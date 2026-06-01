@@ -1,0 +1,97 @@
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+const Role = require('../models/role.model');
+const User = require('../models/user.model');
+const connectDB = require('../../config/database.config');
+const env = require('../../config/env.config');
+
+const seedRolesAndUsers = async () => {
+  try {
+    // 1. Seed Roles
+    const rolesData = [
+      { name: 'USER', description: 'Regular user role with basic access' },
+      { name: 'STAFF', description: 'Staff role for managing crawl jobs and logs' },
+      { name: 'ADMIN', description: 'Administrator role with full control' }
+    ];
+
+    const rolesMap = {};
+
+    for (const r of rolesData) {
+      let role = await Role.findOne({ name: r.name });
+      if (!role) {
+        role = await Role.create(r);
+        console.log(`[Seed] Created role: ${r.name}`);
+      } else {
+        console.log(`[Seed] Role ${r.name} already exists.`);
+      }
+      rolesMap[r.name] = role._id;
+    }
+
+    // 2. Seed Users
+    const usersData = [
+      {
+        full_name: 'Regular User',
+        email: 'user@example.com',
+        password: 'user123456',
+        role: 'USER',
+        status: 'ACTIVE'
+      },
+      {
+        full_name: 'Staff Member',
+        email: 'staff@example.com',
+        password: 'staff123456',
+        role: 'STAFF',
+        status: 'ACTIVE'
+      },
+      {
+        full_name: 'Administrator',
+        email: 'admin@example.com',
+        password: 'admin123456',
+        role: 'ADMIN',
+        status: 'ACTIVE'
+      },
+      {
+        full_name: 'Locked User',
+        email: 'locked@example.com',
+        password: 'locked123456',
+        role: 'USER',
+        status: 'LOCKED'
+      }
+    ];
+
+    for (const u of usersData) {
+      let user = await User.findOne({ email: u.email });
+      if (!user) {
+        const hashedPassword = await bcrypt.hash(u.password, env.BCRYPT_SALT_ROUNDS || 10);
+        user = await User.create({
+          full_name: u.full_name,
+          email: u.email,
+          password_hash: hashedPassword,
+          role_id: rolesMap[u.role],
+          status: u.status
+        });
+        console.log(`[Seed] Created user: ${u.email} (${u.role})`);
+      } else {
+        console.log(`[Seed] User ${u.email} already exists.`);
+      }
+    }
+
+    console.log('[Seed] Seeding completed successfully.');
+  } catch (error) {
+    console.error(`[Seed] Error seeding roles and users: ${error.message}`);
+    throw error;
+  }
+};
+
+// If run directly
+if (require.main === module) {
+  const runStandalone = async () => {
+    await connectDB();
+    await seedRolesAndUsers();
+    await mongoose.connection.close();
+    process.exit(0);
+  };
+  runStandalone();
+}
+
+module.exports = seedRolesAndUsers;
