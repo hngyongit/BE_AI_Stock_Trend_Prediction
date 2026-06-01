@@ -1,7 +1,7 @@
 const env = require('./env.config');
 
 module.exports = {
-  port: env.port || 5000,
+  port: env.PORT || 5000,
   env: env.NODE_ENV,
   corsOptions: {
     origin: '*',
