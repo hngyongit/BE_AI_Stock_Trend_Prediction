@@ -1,0 +1,17 @@
+.env
+*.env
+.env.*
+service_account.json
+*.json
+!package*.json
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+output/
+logs/
+.vscode/
+.idea/
+.DS_Store

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-vietstock-data-crawler"
+version = "0.1.0"
+description = "Folder-based Vietstock finance crawler with Google Sheets output and optional LLM hooks."
+requires-python = ">=3.11"
+authors = [{ name = "Internal" }]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
