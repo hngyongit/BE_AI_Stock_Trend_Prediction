@@ -31,8 +31,23 @@ const validate = (req, res, next) => {
   return error(res, 'Validation failed', extractedErrors, 400);
 };
 
+const registerValidationRules = [
+  body('full_name')
+    .notEmpty().withMessage('Full name is required')
+    .trim()
+    .isLength({ min: 2, max: 100 }).withMessage('Full name must be between 2 and 100 characters'),
+  body('email')
+    .notEmpty().withMessage('Email is required')
+    .isEmail().withMessage('Invalid email format')
+    .normalizeEmail(),
+  body('password')
+    .notEmpty().withMessage('Password is required')
+    .isLength({ min: 8 }).withMessage('Password must be at least 8 characters long')
+];
+
 module.exports = {
   loginValidationRules,
   refreshTokenValidationRules,
+  registerValidationRules,
   validate
 };

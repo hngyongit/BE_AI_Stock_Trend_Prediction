@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const authController = require('./auth.controller');
 const authMiddleware = require('../../common/middlewares/auth.middleware');
-const { loginValidationRules, refreshTokenValidationRules, validate } = require('./auth.validation');
+const { loginValidationRules, refreshTokenValidationRules, registerValidationRules, validate } = require('./auth.validation');
 
 /**
  * @openapi
@@ -165,16 +165,39 @@ router.post('/refresh-token', refreshTokenValidationRules, validate, authControl
 
 /**
  * @openapi
- * /api/auth/me:
- *   get:
- *     summary: Get current logged-in user profile
- *     description: Retrieve details of the user associated with the provided access token.
+ * /api/auth/register:
+ *   post:
+ *     summary: Register a new user
+ *     description: Create a new user account with default role USER and status ACTIVE.
  *     tags: [Auth]
- *     security:
- *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - full_name
+ *               - email
+ *               - password
+ *             properties:
+ *               full_name:
+ *                 type: string
+ *                 minLength: 2
+ *                 maxLength: 100
+ *                 example: New User
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 example: newuser@example.com
+ *               password:
+ *                 type: string
+ *                 format: password
+ *                 minLength: 8
+ *                 example: newuser123456
  *     responses:
- *       200:
- *         description: User details successfully retrieved.
+ *       201:
+ *         description: User registered successfully.
  *         content:
  *           application/json:
  *             schema:
@@ -183,33 +206,44 @@ router.post('/refresh-token', refreshTokenValidationRules, validate, authControl
  *                 success:
  *                   type: boolean
  *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: User registered successfully
  *                 data:
  *                   type: object
  *                   properties:
- *                     id:
- *                       type: string
- *                       example: 6a1d3cacd1bbbbbbdaca6892
- *                     full_name:
- *                       type: string
- *                       example: Regular User
- *                     email:
- *                       type: string
- *                       example: user@example.com
- *                     role:
- *                       type: string
- *                       example: USER
- *                     status:
- *                       type: string
- *                       example: ACTIVE
- *                     created_at:
- *                       type: string
- *                       format: date-time
- *                       example: 2026-06-01T00:00:00.000Z
- *       401:
- *         description: Unauthorized. Missing or invalid Bearer access token.
- *       403:
- *         description: Account is locked or inactive.
+ *                     user:
+ *                       type: object
+ *                       properties:
+ *                         id:
+ *                           type: string
+ *                           example: 665f1a2b9c1e2a0012a12345
+ *                         full_name:
+ *                           type: string
+ *                           example: New User
+ *                         email:
+ *                           type: string
+ *                           example: newuser@example.com
+ *                         role:
+ *                           type: string
+ *                           example: USER
+ *                         status:
+ *                           type: string
+ *                           example: ACTIVE
+ *       400:
+ *         description: Validation failed or email already registered.
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 message:
+ *                   type: string
+ *                   example: Email is already registered
  */
-router.get('/me', authMiddleware, authController.getMe);
+router.post('/register', registerValidationRules, validate, authController.register);
 
 module.exports = router;

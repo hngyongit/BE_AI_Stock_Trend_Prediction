@@ -113,8 +113,52 @@ const refreshToken = async (token) => {
   };
 };
 
+/**
+ * Register a new user
+ * @param {String} fullName 
+ * @param {String} email 
+ * @param {String} password 
+ * @returns {Promise<Object>} Created User
+ */
+const register = async (fullName, email, password) => {
+  const normalizedEmail = email.toLowerCase();
+
+  // Check if email already registered
+  const existingUser = await User.findOne({ email: normalizedEmail });
+  if (existingUser) {
+    const error = new Error('Email is already registered');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  // Find standard USER role
+  const userRole = await Role.findOne({ name: 'USER' });
+  if (!userRole) {
+    const error = new Error('Standard USER role not found in system');
+    error.statusCode = 500;
+    throw error;
+  }
+
+  // Hash password
+  const salt = await bcrypt.genSalt(10);
+  const hashedPassword = await bcrypt.hash(password, salt);
+
+  // Create User
+  const newUser = await User.create({
+    full_name: fullName,
+    email: normalizedEmail,
+    password_hash: hashedPassword,
+    role_id: userRole._id,
+    status: 'ACTIVE'
+  });
+
+  const userDoc = await User.findById(newUser._id).populate('role_id');
+  return userDoc;
+};
+
 module.exports = {
   login,
   logout,
-  refreshToken
+  refreshToken,
+  register
 };

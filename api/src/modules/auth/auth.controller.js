@@ -55,26 +55,25 @@ const refreshToken = async (req, res, next) => {
 };
 
 /**
- * Get Current User Profile Controller
+ * Register Controller
  */
-const getMe = async (req, res, next) => {
+const register = async (req, res, next) => {
   try {
-    const userObj = req.user.toJSON();
-    const roleName = req.user.role_id?.name || 'USER';
+    const { full_name, email, password } = req.body;
+    const user = await authService.register(full_name, email, password);
 
+    // Format output to match standard response
     const formattedUser = {
-      id: req.user._id.toString(),
-      full_name: req.user.full_name,
-      email: req.user.email,
-      role: roleName,
-      status: req.user.status,
-      created_at: req.user.created_at
+      id: user._id.toString(),
+      full_name: user.full_name,
+      email: user.email,
+      role: user.role_id?.name || 'USER',
+      status: user.status
     };
 
-    // Return the response format from Section 8.3
-    // Note that Section 8.3 returns the user directly in "data" (e.g. data: { id, full_name... })
-    // and success is helper wrapper which returns { success: true, data: formattedUser }
-    return success(res, undefined, formattedUser);
+    return success(res, 'User registered successfully', {
+      user: formattedUser
+    }, 201);
   } catch (error) {
     next(error);
   }
@@ -84,5 +83,5 @@ module.exports = {
   login,
   logout,
   refreshToken,
-  getMe
+  register
 };

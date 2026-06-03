@@ -5,6 +5,9 @@ const morgan = require('morgan');
 const appConfig = require('./config/app.config');
 const errorMiddleware = require('./common/middlewares/error.middleware');
 const authRouter = require('./modules/auth/auth.routes');
+const { usersRouter, adminUsersRouter } = require('./modules/users/users.routes');
+const { stocksRouter, adminStocksRouter } = require('./modules/stocks/stocks.routes');
+const watchlistsRouter = require('./modules/watchlists/watchlists.routes');
 const { error } = require('./common/utils/response.util');
 
 const swaggerUi = require('swagger-ui-express');
@@ -32,6 +35,11 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // API Routes
 app.use('/api/auth', authRouter);
+app.use('/api/users', usersRouter);
+app.use('/api/admin/users', adminUsersRouter);
+app.use('/api/stocks', stocksRouter);
+app.use('/api/admin/stocks', adminStocksRouter);
+app.use('/api/watchlists', watchlistsRouter);
 
 // Health check endpoint
 app.get('/', (req, res) => {
