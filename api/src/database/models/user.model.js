@@ -27,7 +27,7 @@ const UserSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['ACTIVE', 'INACTIVE', 'LOCKED'],
+      enum: ['ACTIVE', 'LOCKED'],
       default: 'ACTIVE'
     },
     refresh_token_hash: {

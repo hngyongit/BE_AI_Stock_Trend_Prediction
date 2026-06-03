@@ -41,6 +41,13 @@ def env_float(name: str, default: float) -> float:
 class Settings:
     """Typed runtime configuration loaded from `.env` and environment variables."""
 
+    # MongoDB configurations
+    mongodb_uri: str
+    save_to_mongodb: bool
+    load_config_from_mongodb: bool
+
+    # Google Sheets configurations
+    save_to_gsheet: bool
     google_sheet_id: str
     google_service_account_file: str
     config_sheet_name: str
@@ -85,13 +92,17 @@ class Settings:
             wait_until = "domcontentloaded"
 
         return cls(
+            mongodb_uri=os.getenv("MONGODB_URI", "").strip(),
+            save_to_mongodb=env_bool("SAVE_TO_MONGODB", True),
+            load_config_from_mongodb=env_bool("LOAD_CONFIG_FROM_MONGODB", True),
+            save_to_gsheet=env_bool("SAVE_TO_GSHEET", False),
             google_sheet_id=os.getenv("GOOGLE_SHEET_ID", "").strip(),
             google_service_account_file=os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE", "service_account.json").strip(),
             config_sheet_name=os.getenv("CONFIG_SHEET_NAME", DEFAULT_CONFIG_SHEET_NAME).strip(),
-            request_delay_seconds=env_float("REQUEST_DELAY_SECONDS", 0.2),
-            page_wait_ms=env_int("PAGE_WAIT_MS", 1500),
-            page_timeout_ms=env_int("PAGE_TIMEOUT_MS", 25000),
-            max_page_retries=env_int("MAX_PAGE_RETRIES", 5),
+            request_delay_seconds=env_float("REQUEST_DELAY_SECONDS", 0.5),
+            page_wait_ms=env_int("PAGE_WAIT_MS", 2000),
+            page_timeout_ms=env_int("PAGE_TIMEOUT_MS", 30000),
+            max_page_retries=env_int("MAX_PAGE_RETRIES", 3),
             page_retry_sleep_seconds=env_float("PAGE_RETRY_SLEEP_SECONDS", 5.0),
             playwright_wait_until=wait_until,
             bctt_page_wait_ms=env_int("BCTT_PAGE_WAIT_MS", 2500),
@@ -121,15 +132,25 @@ class Settings:
         )
 
     def validate_required(self) -> None:
-        if not self.google_sheet_id:
-            raise RuntimeError("Thiếu GOOGLE_SHEET_ID trong file .env")
-        if not Path(self.google_service_account_file).exists():
-            raise RuntimeError(f"Không tìm thấy file service account: {self.google_service_account_file}")
+        if self.save_to_mongodb or self.load_config_from_mongodb:
+            if not self.mongodb_uri:
+                raise RuntimeError("Thiếu MONGODB_URI trong file .env khi sử dụng MongoDB")
+        
+        if self.save_to_gsheet or not self.load_config_from_mongodb:
+            if not self.google_sheet_id:
+                raise RuntimeError("Thiếu GOOGLE_SHEET_ID trong file .env khi sử dụng Google Sheets")
+            if not Path(self.google_service_account_file).exists():
+                raise RuntimeError(f"Không tìm thấy file service account: {self.google_service_account_file} khi sử dụng Google Sheets")
 
 
 SETTINGS = Settings.from_env()
 
 # Compatibility constants used by parsing/service modules. They are centralized here.
+MONGODB_URI = SETTINGS.mongodb_uri
+SAVE_TO_MONGODB = SETTINGS.save_to_mongodb
+LOAD_CONFIG_FROM_MONGODB = SETTINGS.load_config_from_mongodb
+SAVE_TO_GSHEET = SETTINGS.save_to_gsheet
+
 SHEET_ID = SETTINGS.google_sheet_id
 SERVICE_ACCOUNT_FILE = SETTINGS.google_service_account_file
 CONFIG_SHEET_NAME = SETTINGS.config_sheet_name

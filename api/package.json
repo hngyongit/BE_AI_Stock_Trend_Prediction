@@ -5,7 +5,11 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "test": "node test/test-auth-flow.js && node test/test-users-flow.js && node test/test-stocks-watchlist-flow.js",
+    "test:auth": "node test/test-auth-flow.js",
+    "test:users": "node test/test-users-flow.js",
+    "test:stocks": "node test/test-stocks-watchlist-flow.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

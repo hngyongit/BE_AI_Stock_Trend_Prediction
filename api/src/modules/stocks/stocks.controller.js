@@ -1,0 +1,60 @@
+const stocksService = require('./stocks.service');
+const { success } = require('../../common/utils/response.util');
+
+const getStocks = async (req, res, next) => {
+  try {
+    const { keyword, market, page, limit } = req.query;
+    const result = await stocksService.getStocksList({ keyword, market, page, limit });
+    return success(res, 'Get stocks successfully', result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getStockDetail = async (req, res, next) => {
+  try {
+    const { symbol } = req.params;
+    const result = await stocksService.getStockDetail(symbol);
+    return success(res, 'Get stock detail successfully', result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const getStockChart = async (req, res, next) => {
+  try {
+    const { symbol } = req.params;
+    const { range } = req.query;
+    const result = await stocksService.getStockChart(symbol, range);
+    return success(res, 'Get price history successfully', result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const createStockMaster = async (req, res, next) => {
+  try {
+    const result = await stocksService.createStockMaster(req.body);
+    return success(res, 'Create stock master successfully', result, 201);
+  } catch (error) {
+    next(error);
+  }
+};
+
+const updateStockMaster = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const result = await stocksService.updateStockMaster(id, req.body);
+    return success(res, 'Update stock master successfully', result);
+  } catch (error) {
+    next(error);
+  }
+};
+
+module.exports = {
+  getStocks,
+  getStockDetail,
+  getStockChart,
+  createStockMaster,
+  updateStockMaster
+};
