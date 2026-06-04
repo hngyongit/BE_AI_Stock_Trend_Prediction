@@ -52,6 +52,30 @@ class MongoDBService:
         logger.info(f"[MongoDB] Tự động tạo data source: {name} (ID: {res.inserted_id})")
         return res.inserted_id
 
+    def get_or_create_stock_data_source(self, stock_id: ObjectId, symbol: str) -> tuple[Optional[ObjectId], str]:
+        if not self.is_connected() or not stock_id:
+            return None, ""
+        col = self.db["dimStockDataSources"]
+        ds = col.find_one({"stock_id": stock_id})
+        if ds:
+            return ds["_id"], ds.get("market_price_data_url", "")
+            
+        # Create a default data source for this stock if missing
+        symbol_lower = symbol.lower()
+        new_ds = {
+            "stock_id": stock_id,
+            "trade_stats_url": f"https://finance.vietstock.vn/{symbol_lower}/thong-ke-giao-dich.htm",
+            "market_price_data_url": f"https://finance.vietstock.vn/{symbol_lower}-profile.htm",
+            "financial_data_url": f"https://finance.vietstock.vn/{symbol_lower}-profile.htm",
+            "description": f"Vietstock crawl URLs for {symbol}",
+            "status": "active",
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
+        res = col.insert_one(new_ds)
+        logger.info(f"[MongoDB] Tự động tạo stock data source mới cho: {symbol} (ID: {res.inserted_id})")
+        return res.inserted_id, new_ds["market_price_data_url"]
+
     def load_stock_configs(self) -> List[Dict[str, str]]:
         if not self.is_connected():
             logger.warning("[MongoDB] Không có kết nối DB. Không thể load configs.")
@@ -69,15 +93,28 @@ class MongoDBService:
             symbol = s.get("symbol", "").upper()
             if not symbol:
                 continue
-            # Slug mặc định trong Vietstock là chữ thường của symbol
-            # Ví dụ: FPT -> fpt
             slug = s.get("slug", symbol.lower())
+            
+            # Query the dimStockDataSources collection for this stock_id
+            ds_col = self.db["dimStockDataSources"]
+            ds = ds_col.find_one({"stock_id": s["_id"]})
+            
+            market_price_data_url = ""
+            data_source_id = None
+            trading_stats_url = ""
+            if ds:
+                market_price_data_url = ds.get("market_price_data_url", "")
+                data_source_id = ds["_id"]
+                trading_stats_url = ds.get("trade_stats_url", "")
+            
             configs.append({
                 "symbol": symbol,
                 "slug": slug,
                 "company_name_vi": s.get("company_name", ""),
-                "profile_url": f"https://finance.vietstock.vn/{slug}/ho-so-doanh-nghiep.htm",
-                "trading_stats_url": f"https://finance.vietstock.vn/{slug}/thong-ke-giao-dich.htm",
+                "profile_url": market_price_data_url,
+                "market_price_data_url": market_price_data_url,
+                "trading_stats_url": trading_stats_url,
+                "data_source_id": data_source_id,
                 "stock_id": s["_id"],
                 "market_id": s.get("market_id"),
                 "industry_id": s.get("industry_id")

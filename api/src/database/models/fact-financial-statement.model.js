@@ -14,11 +14,11 @@ const FactFinancialStatementSchema = new mongoose.Schema(
     },
     data_source_id: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'DimDataSource',
+      ref: 'DimStockDataSource',
       required: true
     },
 
-    # Doanh thu / Lợi nhuận
+    //# Doanh thu / Lợi nhuận
     net_revenue: {
       type: Number
     },
@@ -41,7 +41,7 @@ const FactFinancialStatementSchema = new mongoose.Schema(
       type: Number
     },
 
-    # Tài sản / Nợ
+    //# Tài sản / Nợ
     current_assets: {
       type: Number
     },
@@ -58,7 +58,7 @@ const FactFinancialStatementSchema = new mongoose.Schema(
       type: Number
     },
 
-    # Ngân hàng / Tài chính đặc thù
+    //# Ngân hàng / Tài chính đặc thù
     net_interest_income: {
       type: Number
     },
@@ -78,7 +78,7 @@ const FactFinancialStatementSchema = new mongoose.Schema(
       type: Number
     },
 
-    # Định giá & Hiệu quả
+    //# Định giá & Hiệu quả
     eps: {
       type: Number
     },

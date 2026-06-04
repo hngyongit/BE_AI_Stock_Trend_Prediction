@@ -59,7 +59,10 @@ const {
  *                           company_name:
  *                             type: string
  *                             example: Công ty Cổ phần FPT
- *                           exchange_code:
+ *                           market_id:
+ *                             type: string
+ *                             example: 665f1a2b9c1e2a0012a99001
+ *                           market_code:
  *                             type: string
  *                             example: HOSE
  *                       latest_price:

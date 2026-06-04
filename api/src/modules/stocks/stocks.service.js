@@ -23,7 +23,7 @@ const getStocksList = async ({ keyword, market, page = 1, limit = 10 }) => {
     id: stock._id.toString(),
     symbol: stock.symbol,
     company_name: stock.company_name,
-    exchange_code: stock.exchange_code,
+    market_code: stock.market_id ? stock.market_id.code : '',
     status: stock.status
   }));
 
@@ -54,20 +54,19 @@ const getStockDetail = async (symbol) => {
     id: stock._id.toString(),
     symbol: stock.symbol,
     company_name: stock.company_name,
-    exchange_code: stock.exchange_code,
+    market_code: stock.market_id ? stock.market_id.code : '',
     status: stock.status,
     listed_date: stock.listed_date || null,
     latest_price: null
   };
 
   if (latestPrice) {
+    const { _id, stock_id, market_id, industry_id, data_source_id, __v, ...priceData } = latestPrice;
     result.latest_price = {
-      close_price: latestPrice.close_price,
-      price_change: latestPrice.price_change || 0,
-      price_change_percent: latestPrice.price_change_percent || 0,
-      volume: latestPrice.volume,
-      market_cap: latestPrice.market_cap || 0,
-      time_id: latestPrice.time_id
+      ...priceData,
+      price_change: priceData.price_change || 0,
+      price_change_percent: priceData.price_change_percent || 0,
+      market_cap: priceData.market_cap || 0
     };
   }
 
@@ -114,21 +113,18 @@ const createStockMaster = async (data) => {
     throw error;
   }
 
-  const exCode = data.exchange_code.toUpperCase();
-  let market = await DimMarket.findOne({ code: exCode });
+  const market = await DimMarket.findById(data.market_id);
   if (!market) {
-    market = await DimMarket.create({
-      name: `${exCode} Market`,
-      code: exCode,
-      description: `Auto-generated market for ${exCode}`
-    });
+    const error = new Error('Market not found');
+    error.statusCode = 400;
+    throw error;
   }
 
   const stock = await DimStock.create({
     market_id: market._id,
+    industry_id: data.industry_id || undefined,
     symbol: symbolUpper,
     company_name: data.company_name,
-    exchange_code: exCode,
     status: data.status || 'ACTIVE',
     listed_date: data.listed_date ? new Date(data.listed_date) : undefined
   });
@@ -137,7 +133,8 @@ const createStockMaster = async (data) => {
     id: stock._id.toString(),
     symbol: stock.symbol,
     company_name: stock.company_name,
-    exchange_code: stock.exchange_code,
+    market_id: stock.market_id.toString(),
+    market_code: market.code,
     status: stock.status
   };
 };
@@ -153,20 +150,19 @@ const updateStockMaster = async (id, data) => {
   if (data.company_name !== undefined) stock.company_name = data.company_name;
   if (data.status !== undefined) stock.status = data.status;
   if (data.listed_date !== undefined) stock.listed_date = new Date(data.listed_date);
+  if (data.industry_id !== undefined) stock.industry_id = data.industry_id || null;
 
-  if (data.exchange_code !== undefined) {
-    const exCode = data.exchange_code.toUpperCase();
-    stock.exchange_code = exCode;
-
-    let market = await DimMarket.findOne({ code: exCode });
+  let market;
+  if (data.market_id !== undefined) {
+    market = await DimMarket.findById(data.market_id);
     if (!market) {
-      market = await DimMarket.create({
-        name: `${exCode} Market`,
-        code: exCode,
-        description: `Auto-generated market for ${exCode}`
-      });
+      const error = new Error('Market not found');
+      error.statusCode = 400;
+      throw error;
     }
     stock.market_id = market._id;
+  } else {
+    market = await DimMarket.findById(stock.market_id);
   }
 
   await stock.save();
@@ -175,7 +171,8 @@ const updateStockMaster = async (id, data) => {
     id: stock._id.toString(),
     symbol: stock.symbol,
     company_name: stock.company_name,
-    exchange_code: stock.exchange_code,
+    market_id: stock.market_id.toString(),
+    market_code: market ? market.code : '',
     status: stock.status
   };
 };

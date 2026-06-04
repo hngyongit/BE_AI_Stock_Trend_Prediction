@@ -11,11 +11,7 @@ const FactMarketOverviewSchema = new mongoose.Schema(
       type: Number,
       required: true
     },
-    data_source_id: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'DimDataSource',
-      required: true
-    },
+
     total_volume: {
       type: Number
     },
@@ -65,6 +61,6 @@ const FactMarketOverviewSchema = new mongoose.Schema(
   }
 );
 
-FactMarketOverviewSchema.index({ market_id: 1, time_id: 1, data_source_id: 1 }, { unique: true });
+FactMarketOverviewSchema.index({ market_id: 1, time_id: 1 }, { unique: true });
 
 module.exports = mongoose.model('FactMarketOverview', FactMarketOverviewSchema);

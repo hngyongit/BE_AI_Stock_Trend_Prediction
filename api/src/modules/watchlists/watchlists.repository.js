@@ -5,7 +5,11 @@ const findUserWatchlist = async (userId) => {
   return Watchlist.find({ user_id: userId })
     .populate({
       path: 'stock_id',
-      select: '_id symbol company_name exchange_code status'
+      select: '_id symbol company_name market_id status',
+      populate: {
+        path: 'market_id',
+        select: 'code'
+      }
     })
     .lean();
 };

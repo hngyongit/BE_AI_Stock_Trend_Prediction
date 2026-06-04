@@ -24,6 +24,11 @@ const DimMarketSchema = new mongoose.Schema(
       trim: true,
       default: ''
     },
+    market_src_url: {
+      type: String,
+      trim: true,
+      default: ''
+    },
     status: {
       type: String,
       enum: ['active', 'inactive'],

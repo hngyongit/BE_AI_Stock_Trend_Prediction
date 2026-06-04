@@ -36,6 +36,15 @@ def run() -> None:
     settings = get_settings()
     settings.validate_required()
 
+    # Apply dry_run override
+    if settings.dry_run:
+        logging.info("🔍 DRY RUN MODE ENABLED – sẽ không lưu dữ liệu vào database hay Google Sheets")
+        settings = settings.__class__(
+            **{k: v for k, v in settings.__dict__.items() if k not in {'save_to_mongodb', 'save_to_gsheet'}},
+            save_to_mongodb=False,
+            save_to_gsheet=False
+        )
+
     # 1. Khởi tạo MongoDB Service
     db_service = MongoDBService()
     configs: List[Dict[str, Any]] = []
@@ -72,6 +81,11 @@ def run() -> None:
             })
 
     symbols_count = len([x for x in configs if clean_config_text(x.get("symbol"))])
+    if settings.crawl_limit > 0:
+        configs = configs[:settings.crawl_limit]
+        symbols_count = len(configs)
+        logging.info(f"🔧 Cấu hình giới hạn crawl: chỉ crawl {symbols_count} mã đầu tiên (CRAWL_LIMIT={settings.crawl_limit})")
+
     logging.info(f"Bắt đầu crawl cho {symbols_count} mã cổ phiếu.")
 
     # 3. Tạo crawl log trong MongoDB
@@ -125,20 +139,70 @@ def run() -> None:
     records_failed = 0
 
     with VietstockBrowser() as browser:
-        for item in configs:
+        for idx, item in enumerate(configs, start=1):
             symbol = clean_config_text(item.get("symbol")).upper()
             slug = normalize_slug_value(item.get("slug"))
-            profile_url = clean_config_text(item.get("profile_url"))
-            trading_stats_url = clean_config_text(item.get("trading_stats_url"))
-            stock_id = item.get("stock_id")
-            market_id = item.get("market_id")
-            industry_id = item.get("industry_id")
-
+            
             if not symbol:
                 continue
 
-            records_fetched += 1
-            logging.info(f"=== [{records_fetched}/{symbols_count}] Crawling {symbol} ===")
+            stock_id = item.get("stock_id")
+            market_id = item.get("market_id")
+            industry_id = item.get("industry_id")
+            
+            # Retrieve or create stock data source details from DB if connected
+            market_price_data_url = ""
+            data_source_id = item.get("data_source_id")
+            
+            if db_service.is_connected():
+                # 1. Resolve stock_id, market_id, industry_id if missing
+                if not stock_id:
+                    s_doc = db_service.db["dimstocks"].find_one({"symbol": symbol})
+                    if s_doc:
+                        stock_id = s_doc["_id"]
+                        market_id = s_doc.get("market_id")
+                        industry_id = s_doc.get("industry_id")
+                    else:
+                        # Auto-create stock if not found
+                        hose = db_service.db["dimMarkets"].find_one({"code": "HOSE"})
+                        market_id = hose["_id"] if hose else None
+                        new_stock = {
+                            "market_id": market_id,
+                            "industry_id": None,
+                            "symbol": symbol,
+                            "company_name": symbol,
+                            "status": "ACTIVE",
+                            "created_at": datetime.utcnow(),
+                            "updated_at": datetime.utcnow()
+                        }
+                        res = db_service.db["dimstocks"].insert_one(new_stock)
+                        stock_id = res.inserted_id
+                        logging.info(f"[MongoDB] Tự động tạo Stock mới cho {symbol} (ID: {stock_id})")
+                
+                # 2. Get data_source_id and market_price_data_url
+                data_source_id, market_price_data_url = db_service.get_or_create_stock_data_source(stock_id, symbol)
+            else:
+                # If not connected, use the URLs from configs or fallback
+                market_price_data_url = item.get("market_price_data_url") or item.get("profile_url") or f"https://finance.vietstock.vn/{slug}.htm"
+                data_source_id = None
+
+            # Skip checking/crawling if market_price_data_url is empty/null
+            if not market_price_data_url:
+                logging.warning(f"  [{symbol}] Missing market_price_data_url -> SKIPPED")
+                if settings.save_to_mongodb and db_service.is_connected() and log_id:
+                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SKIPPED", "Missing market_price_data_url")
+                continue
+
+            # Retrieve or construct trading_stats_url
+            trading_stats_url = item.get("trading_stats_url")
+            if not trading_stats_url and db_service.is_connected() and stock_id:
+                ds = db_service.db["dimStockDataSources"].find_one({"stock_id": stock_id})
+                if ds:
+                    trading_stats_url = ds.get("trade_stats_url", "")
+            if not trading_stats_url or "finance.vietstock.vn" not in trading_stats_url:
+                trading_stats_url = f"https://finance.vietstock.vn/{symbol.lower()}/thong-ke-giao-dich.htm"
+
+            logging.info(f"=== [{idx}/{symbols_count}] Crawling {symbol} ===")
             
             try:
                 # 4. Thực hiện crawl
@@ -146,9 +210,11 @@ def run() -> None:
                     symbol=symbol,
                     slug=slug,
                     browser=browser,
-                    profile_url=profile_url,
+                    profile_url=market_price_data_url,
                     crawl_financial=settings.enable_financial_data,
                 )
+                
+                records_fetched += 1
                 
                 stats = None
                 if settings.enable_trading_stats and run_trading_stats:
@@ -161,36 +227,15 @@ def run() -> None:
                 if stats:
                     trading_records.append(stats)
 
+                # In kết quả crawl chi tiết lên terminal
+                logging.info(f"  [{symbol}] Dữ liệu Market: {market}")
+                if settings.enable_financial_data:
+                    logging.info(f"  [{symbol}] Dữ liệu Financial: {financial}")
+                if stats:
+                    logging.info(f"  [{symbol}] Dữ liệu Trading: {stats}")
+
                 # 5. Lưu MongoDB trực tiếp cho từng stock
                 if settings.save_to_mongodb and db_service.is_connected() and log_id:
-                    # Lấy stock_id, market_id, industry_id thực tế từ database nếu load config thiếu
-                    if not stock_id:
-                        # Tìm trong dimstocks
-                        s_doc = db_service.db["dimstocks"].find_one({"symbol": symbol})
-                        if s_doc:
-                            stock_id = s_doc["_id"]
-                            market_id = s_doc.get("market_id")
-                            industry_id = s_doc.get("industry_id")
-                        else:
-                            # Tạo mới dimstock nếu chưa tồn tại
-                            # 1. Lấy HOSE market
-                            hose = db_service.db["dimMarkets"].find_one({"code": "HOSE"})
-                            market_id = hose["_id"] if hose else None
-                            # 2. Tạo stock
-                            new_stock = {
-                                "market_id": market_id,
-                                "industry_id": None,
-                                "symbol": symbol,
-                                "company_name": market.get("company_name") or symbol,
-                                "exchange_code": "HOSE",
-                                "status": "ACTIVE",
-                                "created_at": datetime.utcnow(),
-                                "updated_at": datetime.utcnow()
-                            }
-                            res = db_service.db["dimstocks"].insert_one(new_stock)
-                            stock_id = res.inserted_id
-                            logging.info(f"[MongoDB] Tự động tạo Stock mới cho {symbol} (ID: {stock_id})")
-
                     # Ghi Market Price
                     if market.get("is_valid_url") and not market.get("error"):
                         # Trộn thông tin trading stats nếu có vào market record để lưu factMarketPrices đầy đủ
@@ -203,13 +248,13 @@ def run() -> None:
                         status_mp = db_service.save_market_price(market, stock_id, market_id, industry_id, data_source_id)
                         if status_mp == "INSERT":
                             records_inserted += 1
+                            db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SUCCESS", "Thành công")
                         elif status_mp == "UPDATE":
                             records_updated += 1
+                            db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SUCCESS", "Thành công")
                         else:
                             records_failed += 1
                             db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "FAILED", market.get("error") or "Lưu DB thất bại")
-                            
-                        db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SUCCESS", "Thành công")
                     else:
                         records_failed += 1
                         err_msg = market.get("error") or "Invalid URL"

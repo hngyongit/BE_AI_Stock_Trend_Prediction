@@ -84,7 +84,7 @@ const {
  *                           company_name:
  *                             type: string
  *                             example: Công ty Cổ phần FPT
- *                           exchange_code:
+ *                           market_code:
  *                             type: string
  *                             example: HOSE
  *                           status:
@@ -149,7 +149,7 @@ router.get('/', getStocksValidation, validate, stocksController.getStocks);
  *                     company_name:
  *                       type: string
  *                       example: Công ty Cổ phần FPT
- *                     exchange_code:
+ *                     market_code:
  *                       type: string
  *                       example: HOSE
  *                     status:
@@ -162,24 +162,79 @@ router.get('/', getStocksValidation, validate, stocksController.getStocks);
  *                     latest_price:
  *                       type: object
  *                       properties:
+ *                         open_price:
+ *                           type: number
+ *                           example: 133500
+ *                         high_price:
+ *                           type: number
+ *                           example: 136000
+ *                         low_price:
+ *                           type: number
+ *                           example: 133000
  *                         close_price:
  *                           type: number
  *                           example: 135000
+ *                         volume:
+ *                           type: number
+ *                           example: 2500000
+ *                         bid_volume:
+ *                           type: number
+ *                           example: 120000
+ *                         ask_volume:
+ *                           type: number
+ *                           example: 150000
+ *                         foreign_buy:
+ *                           type: number
+ *                           example: 45000
+ *                         foreign_sell:
+ *                           type: number
+ *                           example: 30000
+ *                         foreign_net:
+ *                           type: number
+ *                           example: 15000
+ *                         market_cap:
+ *                           type: number
+ *                           example: 170000000000000
+ *                         eps:
+ *                           type: number
+ *                           example: 5400
+ *                         pe:
+ *                           type: number
+ *                           example: 25.0
+ *                         forward_pe:
+ *                           type: number
+ *                           example: 22.5
+ *                         bvps:
+ *                           type: number
+ *                           example: 32000
+ *                         pb:
+ *                           type: number
+ *                           example: 4.2
+ *                         beta:
+ *                           type: number
+ *                           example: 1.15
+ *                         ros:
+ *                           type: number
+ *                           example: 0.12
+ *                         roe:
+ *                           type: number
+ *                           example: 0.24
+ *                         roaa:
+ *                           type: number
+ *                           example: 0.08
  *                         price_change:
  *                           type: number
  *                           example: 1500
  *                         price_change_percent:
  *                           type: number
  *                           example: 1.12
- *                         volume:
- *                           type: number
- *                           example: 2500000
- *                         market_cap:
- *                           type: number
- *                           example: 170000000000000
  *                         time_id:
  *                           type: integer
  *                           example: 20260601
+ *                         crawled_at:
+ *                           type: string
+ *                           format: date-time
+ *                           example: 2026-06-01T15:30:00.000Z
  *       404:
  *         description: Stock symbol not found.
  */
@@ -269,7 +324,7 @@ router.get('/:symbol/chart', getChartValidation, validate, stocksController.getS
  *             required:
  *               - symbol
  *               - company_name
- *               - exchange_code
+ *               - market_id
  *             properties:
  *               symbol:
  *                 type: string
@@ -277,9 +332,14 @@ router.get('/:symbol/chart', getChartValidation, validate, stocksController.getS
  *               company_name:
  *                 type: string
  *                 example: Công ty Cổ phần FPT
- *               exchange_code:
+ *               market_id:
  *                 type: string
- *                 example: HOSE
+ *                 description: ObjectId referencing dimMarkets collection
+ *                 example: 665f1a2b9c1e2a0012a99001
+ *               industry_id:
+ *                 type: string
+ *                 description: ObjectId referencing dimIndustries collection (optional)
+ *                 example: 665f1a2b9c1e2a0012a99002
  *               status:
  *                 type: string
  *                 enum: [ACTIVE, DELISTED, SUSPENDED]
@@ -311,8 +371,12 @@ router.get('/:symbol/chart', getChartValidation, validate, stocksController.getS
  *                       type: string
  *                     company_name:
  *                       type: string
- *                     exchange_code:
+ *                     market_id:
  *                       type: string
+ *                       description: ObjectId of the market this stock belongs to
+ *                     market_code:
+ *                       type: string
+ *                       description: Exchange code (e.g. HOSE, HNX)
  *                     status:
  *                       type: string
  *       400:
@@ -350,9 +414,14 @@ adminRouter.post('/', authMiddleware, roleMiddleware(['ADMIN']), createStockVali
  *               company_name:
  *                 type: string
  *                 example: Công ty Cổ phần FPT Việt Nam
- *               exchange_code:
+ *               market_id:
  *                 type: string
- *                 example: HOSE
+ *                 description: ObjectId referencing dimMarkets (optional, to re-assign market)
+ *                 example: 665f1a2b9c1e2a0012a99001
+ *               industry_id:
+ *                 type: string
+ *                 description: ObjectId referencing dimIndustries (optional)
+ *                 example: 665f1a2b9c1e2a0012a99002
  *               status:
  *                 type: string
  *                 enum: [ACTIVE, DELISTED, SUSPENDED]

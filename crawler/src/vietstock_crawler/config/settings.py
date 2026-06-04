@@ -83,6 +83,8 @@ class Settings:
     enable_llm: bool
     openai_api_key: Optional[str]
     openai_model: str
+    dry_run: bool
+    crawl_limit: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -129,6 +131,8 @@ class Settings:
             enable_llm=env_bool("ENABLE_LLM", False),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5").strip(),
+            dry_run=env_bool("DRY_RUN", False),
+            crawl_limit=env_int("CRAWL_LIMIT", 0),
         )
 
     def validate_required(self) -> None:

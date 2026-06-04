@@ -15,11 +15,11 @@ const FactMarketPriceSchema = new mongoose.Schema(
     industry_id: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'DimIndustry',
-      required: true
+      required: false
     },
     data_source_id: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'DimDataSource',
+      ref: 'DimStockDataSource',
       required: true
     },
     time_id: {

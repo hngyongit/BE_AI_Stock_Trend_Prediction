@@ -4,7 +4,7 @@ const CrawlJobSchema = new mongoose.Schema(
   {
     data_source_id: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'DimDataSource',
+      ref: 'DimStockDataSource',
       required: true
     },
     market_id: {

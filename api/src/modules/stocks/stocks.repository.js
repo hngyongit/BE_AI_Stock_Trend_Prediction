@@ -12,13 +12,19 @@ const findStocksAndCount = async ({ keyword, market, page = 1, limit = 10 }) => 
   }
 
   if (market) {
-    query.exchange_code = market.toUpperCase();
+    const DimMarket = require('../../database/models/dim-market.model');
+    const foundMarket = await DimMarket.findOne({ code: market.toUpperCase() });
+    if (foundMarket) {
+      query.market_id = foundMarket._id;
+    } else {
+      return { items: [], totalItems: 0 };
+    }
   }
 
   const skip = (page - 1) * limit;
 
   const [items, totalItems] = await Promise.all([
-    DimStock.find(query).skip(skip).limit(limit).lean(),
+    DimStock.find(query).populate('market_id').skip(skip).limit(limit).lean(),
     DimStock.countDocuments(query)
   ]);
 
@@ -26,7 +32,7 @@ const findStocksAndCount = async ({ keyword, market, page = 1, limit = 10 }) => 
 };
 
 const findStockBySymbol = async (symbol) => {
-  return DimStock.findOne({ symbol: symbol.toUpperCase() }).lean();
+  return DimStock.findOne({ symbol: symbol.toUpperCase() }).populate('market_id').lean();
 };
 
 const findLatestPriceForStock = async (stockId) => {
