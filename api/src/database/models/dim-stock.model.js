@@ -24,12 +24,6 @@ const DimStockSchema = new mongoose.Schema(
       required: true,
       trim: true
     },
-    exchange_code: {
-      type: String,
-      required: true,
-      uppercase: true,
-      trim: true
-    },
     status: {
       type: String,
       enum: ['ACTIVE', 'DELISTED', 'SUSPENDED'],
@@ -51,6 +45,6 @@ const DimStockSchema = new mongoose.Schema(
   }
 );
 
-DimStockSchema.index({ symbol: 1 }, { unique: true });
+DimStockSchema.index({ market_id: 1, symbol: 1 }, { unique: true });
 
 module.exports = mongoose.model('DimStock', DimStockSchema);

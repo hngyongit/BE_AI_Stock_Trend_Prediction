@@ -14,7 +14,7 @@ const FactFinancialReportSourceSchema = new mongoose.Schema(
     },
     data_source_id: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'DimDataSource',
+      ref: 'DimStockDataSource',
       required: true
     },
     source_url: {
@@ -34,7 +34,7 @@ const FactFinancialReportSourceSchema = new mongoose.Schema(
       default: 'crawled'
     },
 
-    # Báo cáo gốc từ nguồn
+    //# Báo cáo gốc từ nguồn
     bctt_net_revenue: {
       type: Number
     },

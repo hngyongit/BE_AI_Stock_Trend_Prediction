@@ -19,7 +19,8 @@ const getUserWatchlist = async (userId) => {
         id: entry.stock_id._id.toString(),
         symbol: entry.stock_id.symbol,
         company_name: entry.stock_id.company_name,
-        exchange_code: entry.stock_id.exchange_code
+        market_id: entry.stock_id.market_id ? entry.stock_id.market_id._id.toString() : null,
+        market_code: entry.stock_id.market_id ? entry.stock_id.market_id.code : ''
       },
       latest_price: latestPrice ? {
         close_price: latestPrice.close_price,

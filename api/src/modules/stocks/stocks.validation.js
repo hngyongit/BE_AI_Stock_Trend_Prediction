@@ -35,10 +35,12 @@ const createStockValidation = [
     .notEmpty().withMessage('Company name is required')
     .trim()
     .isLength({ min: 2 }).withMessage('Company name must be at least 2 characters'),
-  body('exchange_code')
-    .notEmpty().withMessage('Exchange code is required')
-    .trim()
-    .toUpperCase(),
+  body('market_id')
+    .notEmpty().withMessage('Market ID is required')
+    .isMongoId().withMessage('Invalid market ID format'),
+  body('industry_id')
+    .optional()
+    .isMongoId().withMessage('Invalid industry ID format'),
   body('status')
     .optional()
     .isIn(['ACTIVE', 'DELISTED', 'SUSPENDED']).withMessage('Status must be ACTIVE, DELISTED, or SUSPENDED'),
@@ -53,10 +55,12 @@ const updateStockValidation = [
     .optional()
     .trim()
     .isLength({ min: 2 }).withMessage('Company name must be at least 2 characters'),
-  body('exchange_code')
+  body('market_id')
     .optional()
-    .trim()
-    .toUpperCase(),
+    .isMongoId().withMessage('Invalid market ID format'),
+  body('industry_id')
+    .optional()
+    .isMongoId().withMessage('Invalid industry ID format'),
   body('status')
     .optional()
     .isIn(['ACTIVE', 'DELISTED', 'SUSPENDED']).withMessage('Status must be ACTIVE, DELISTED, or SUSPENDED'),

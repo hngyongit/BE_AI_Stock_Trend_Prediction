@@ -1,20 +1,24 @@
 const mongoose = require('mongoose');
 
-const DimDataSourceSchema = new mongoose.Schema(
+const DimStockDataSourceSchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
+    stock_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'DimStock',
       required: true,
-      unique: true,
-      trim: true
+      unique: true
     },
-    provider_type: {
+    trade_stats_url: {
       type: String,
-      enum: ['API', 'crawler', 'file_import', 'python_library'],
       trim: true,
-      default: 'API'
+      default: ''
     },
-    base_url: {
+    market_price_data_url: {
+      type: String,
+      trim: true,
+      default: ''
+    },
+    financial_data_url: {
       type: String,
       trim: true,
       default: ''
@@ -34,8 +38,8 @@ const DimDataSourceSchema = new mongoose.Schema(
       createdAt: 'created_at',
       updatedAt: 'updated_at'
     },
-    collection: 'dimDataSources'
+    collection: 'dimStockDataSources'
   }
 );
 
-module.exports = mongoose.model('DimDataSource', DimDataSourceSchema);
+module.exports = mongoose.model('DimStockDataSource', DimStockDataSourceSchema);
