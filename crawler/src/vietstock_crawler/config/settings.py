@@ -55,6 +55,7 @@ class Settings:
     request_delay_seconds: float
     page_wait_ms: int
     page_timeout_ms: int
+    symbol_crawl_timeout: float
     max_page_retries: int
     page_retry_sleep_seconds: float
     playwright_wait_until: str
@@ -104,6 +105,7 @@ class Settings:
             request_delay_seconds=env_float("REQUEST_DELAY_SECONDS", 0.5),
             page_wait_ms=env_int("PAGE_WAIT_MS", 2000),
             page_timeout_ms=env_int("PAGE_TIMEOUT_MS", 30000),
+            symbol_crawl_timeout=env_float("SYMBOL_CRAWL_TIMEOUT", 25.0),
             max_page_retries=env_int("MAX_PAGE_RETRIES", 3),
             page_retry_sleep_seconds=env_float("PAGE_RETRY_SLEEP_SECONDS", 5.0),
             playwright_wait_until=wait_until,
@@ -161,6 +163,7 @@ CONFIG_SHEET_NAME = SETTINGS.config_sheet_name
 REQUEST_DELAY_SECONDS = SETTINGS.request_delay_seconds
 PAGE_WAIT_MS = SETTINGS.page_wait_ms
 PAGE_TIMEOUT_MS = SETTINGS.page_timeout_ms
+SYMBOL_CRAWL_TIMEOUT = SETTINGS.symbol_crawl_timeout
 MAX_PAGE_RETRIES = SETTINGS.max_page_retries
 PAGE_RETRY_SLEEP_SECONDS = SETTINGS.page_retry_sleep_seconds
 PLAYWRIGHT_WAIT_UNTIL = SETTINGS.playwright_wait_until
