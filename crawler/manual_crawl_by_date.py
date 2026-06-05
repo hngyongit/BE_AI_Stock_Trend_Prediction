@@ -1,17 +1,29 @@
 """
-manual_crawl_by_date.py
------------------------
-Script crawl thủ công dữ liệu chứng khoán theo ngày bất kỳ.
+manual_crawl_by_date_v2.py
+--------------------------
+Crawl thủ công dữ liệu chứng khoán theo ngày bất kỳ.
+Phiên bản v2: Multi-source fallback để đảm bảo tất cả trường đầy đủ,
+kể cả khi crawl ngày trong quá khứ.
+
+Chiến lược nguồn dữ liệu:
+  Nguồn 1 – Vietstock (Playwright)   : OHLCV, market_cap, price_change
+  Nguồn 2 – TCBS API (miễn phí)     : EPS, PE, PB, ROE, ROAA, ROS, beta,
+                                       foreign_buy, foreign_sell, foreign_net
+  Nguồn 3 – SSI iBoard API (miễn phí): bid_volume, ask_volume, foreign (backup)
 
 Cách dùng:
-    python manual_crawl_by_date.py --date 2026-05-22
-    python manual_crawl_by_date.py --date 2026-05-22 --source vnstock
-    python manual_crawl_by_date.py --date 2026-05-22 --delay 0.3 --dry-run
+    python manual_crawl_by_date_v2.py --date 2026-05-22
+    python manual_crawl_by_date_v2.py --date 2026-05-22 --delay 0.3 --dry-run
+    python manual_crawl_by_date_v2.py --date 2026-05-22 --limit 5
 
-Yêu cầu file .env cùng thư mục có:
+Yêu cầu file .env cùng thư mục:
     MONGODB_URI=...
-    MONGODB_DB_NAME=...  (tuỳ chọn, mặc định lấy từ URI)
+    MONGODB_DB_NAME=...          (tuỳ chọn)
+    ENABLE_FINANCIAL_DATA=false  (tuỳ chọn)
+    HTTP_TIMEOUT=15              (tuỳ chọn, giây)
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
@@ -21,85 +33,78 @@ import time
 import traceback
 from datetime import datetime, date
 from pathlib import Path
+from typing import Optional
 
-import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 from bson import ObjectId
 from dotenv import load_dotenv
-from pymongo import MongoClient, UpdateOne
+from pymongo import MongoClient
 
-# Setup path to import vietstock_crawler
+# ── Path setup ──────────────────────────────────────────
 ROOT = Path(__file__).resolve().parent
-SRC = ROOT / "src"
+SRC  = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from vietstock_crawler.core.browser import VietstockBrowser
 from vietstock_crawler.services.vietstock_service import crawl_company
-from vietstock_crawler.utils.url_utils import normalize_slug_value
-from bs4 import BeautifulSoup
+from vietstock_crawler.utils.number_utils import normalize_number
 
-# ─────────────────────────────────────────────
-# Fix Unicode / emoji cho Windows terminal (CP1258)
-# ─────────────────────────────────────────────
+# ── Fix Unicode cho Windows terminal ────────────────────
 import io
 if hasattr(sys.stdout, "buffer"):
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
 
-# ─────────────────────────────────────────────
-# Cấu hình logging
-# ─────────────────────────────────────────────
-_log_handler = logging.StreamHandler(sys.stdout)
-_log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
-logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
+# ── Logging ─────────────────────────────────────────────
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────
-# Constants
-# ─────────────────────────────────────────────
-DATA_SOURCE_NAME = "vietstock"
-DATA_SOURCE_PROVIDER_TYPE = "browser_crawler"
-DATA_SOURCE_DESCRIPTION = "Playwright crawler cào dữ liệu từ Vietstock Finance"
+# ── Constants ────────────────────────────────────────────
+DATA_SOURCE_NAME        = "vietstock"
+DATA_SOURCE_PROVIDER    = "browser_crawler"
+DATA_SOURCE_DESCRIPTION = "Playwright crawler + TCBS/SSI API fallback"
 
-# MongoDB collection names (khớp với Mongoose schema)
-COL_DIM_STOCKS = "dimstocks"
-COL_DIM_TIMES = "dimTimes"
-COL_DIM_DATA_SOURCES = "dimDataSources"
-COL_DIM_MARKETS = "dimMarkets"
+COL_DIM_STOCKS         = "dimstocks"
+COL_DIM_TIMES          = "dimTimes"
+COL_DIM_DATA_SOURCES   = "dimDataSources"
+COL_DIM_MARKETS        = "dimMarkets"
 COL_FACT_MARKET_PRICES = "factMarketPrices"
-COL_FACT_MARKET_OVERVIEWS = "factMarketOverviews"
-COL_CRAWL_LOGS = "crawlLogs"
-COL_CRAWL_LOG_DETAILS = "crawlLogDetails"
-COL_FACT_CRAWL_QUALITIES = "factCrawlQualities"
+COL_CRAWL_LOGS         = "crawlLogs"
+COL_CRAWL_LOG_DETAILS  = "crawlLogDetails"
+COL_FACT_CRAWL_QUALITY = "factCrawlQualities"
+
+HTTP_TIMEOUT = int(os.getenv("HTTP_TIMEOUT", "15"))
+
+# Shared requests session (connection reuse, common headers)
+_session = requests.Session()
+_session.headers.update({
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/html, */*",
+    "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
+})
 
 
 # ═══════════════════════════════════════════════════════
-# 1. KẾT NỐI MONGODB
+# 1. MONGODB
 # ═══════════════════════════════════════════════════════
 def connect_mongodb():
-    """
-    Kết nối MongoDB từ biến môi trường MONGODB_URI.
-    Trả về (client, db).
-    """
     load_dotenv()
-
-    mongodb_uri = os.getenv("MONGODB_URI")
-    if not mongodb_uri:
+    uri = os.getenv("MONGODB_URI")
+    if not uri:
         logger.error("Không tìm thấy MONGODB_URI trong file .env")
         sys.exit(1)
-
-    # MONGODB_DB_NAME tuỳ chọn – nếu không có thì dùng database mặc định từ URI
     db_name = os.getenv("MONGODB_DB_NAME")
-
     try:
-        client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=10_000)
-        # Kiểm tra kết nối
+        client = MongoClient(uri, serverSelectionTimeoutMS=10_000)
         client.admin.command("ping")
-
-        if db_name:
-            db = client[db_name]
-        else:
-            db = client.get_default_database()
-
+        db = client[db_name] if db_name else client.get_default_database()
         logger.info(f"✅ Kết nối MongoDB thành công. Database: {db.name}")
         return client, db
     except Exception as e:
@@ -108,763 +113,804 @@ def connect_mongodb():
 
 
 # ═══════════════════════════════════════════════════════
-# 2. PARSE NGÀY ĐẦU VÀO
+# 2. PARSE NGÀY
 # ═══════════════════════════════════════════════════════
 def parse_date(date_str: str) -> date:
-    """
-    Parse chuỗi ngày theo định dạng YYYY-MM-DD.
-    Trả về datetime.date.
-    """
     try:
-        parsed = datetime.strptime(date_str, "%Y-%m-%d").date()
-        logger.info(f"📅 Ngày crawl: {parsed.strftime('%d/%m/%Y')}")
-        return parsed
+        d = datetime.strptime(date_str, "%Y-%m-%d").date()
+        logger.info(f"📅 Ngày crawl: {d.strftime('%d/%m/%Y')}")
+        return d
     except ValueError:
-        logger.error(f"❌ Định dạng ngày không hợp lệ: '{date_str}'. Vui lòng dùng YYYY-MM-DD.")
+        logger.error(f"❌ Định dạng ngày không hợp lệ: '{date_str}'. Dùng YYYY-MM-DD.")
         sys.exit(1)
 
 
 def date_to_time_id(d: date) -> int:
-    """
-    Chuyển date thành time_id dạng số nguyên YYYYMMDD.
-    Ví dụ: 2026-05-22 → 20260522
-    """
     return int(d.strftime("%Y%m%d"))
 
 
 # ═══════════════════════════════════════════════════════
-# 3. LẤY DANH SÁCH CỔ PHIẾU TỪ dim_stocks
+# 3. DIM HELPERS (time, data_source, crawl_log …)
 # ═══════════════════════════════════════════════════════
 def get_active_hose_stocks(db) -> list[dict]:
-    """
-    Lấy toàn bộ cổ phiếu HOSE có status='ACTIVE' từ collection dimstocks.
-    Trả về list[dict] với các key: _id, symbol, market_id, industry_id, slug.
-    """
-    market_col = db["dimMarkets"]
-    hose_market = market_col.find_one({"code": "HOSE"})
-    if not hose_market:
-        logger.error("❌ Không tìm thấy HOSE market trong dimMarkets")
+    market = db[COL_DIM_MARKETS].find_one({"code": "HOSE"})
+    if not market:
+        logger.error("❌ Không tìm thấy HOSE market")
         return []
-
-    col = db[COL_DIM_STOCKS]
-    # Mongoose lưu status uppercase 'ACTIVE' (xem dim-stock.model.js)
-    query = {
-        "market_id": hose_market["_id"],
-        "status": {"$in": ["ACTIVE", "active"]},  # hỗ trợ cả hai kiểu
-    }
-    stocks = list(col.find(query, {"_id": 1, "symbol": 1, "market_id": 1, "industry_id": 1, "slug": 1}))
-    logger.info(f"📊 Tìm thấy {len(stocks)} mã cổ phiếu HOSE đang hoạt động")
+    stocks = list(db[COL_DIM_STOCKS].find(
+        {"market_id": market["_id"], "status": {"$in": ["ACTIVE", "active"]}},
+        {"_id": 1, "symbol": 1, "market_id": 1, "industry_id": 1, "slug": 1},
+    ))
+    logger.info(f"📊 Tìm thấy {len(stocks)} mã HOSE đang hoạt động")
     return stocks
 
 
-# ═══════════════════════════════════════════════════════
-# 4. TẠO / KIỂM TRA BẢN GHI TRONG dim_time
-# ═══════════════════════════════════════════════════════
-def get_or_create_dim_time(db, target_date: date) -> int:
-    """
-    Tìm hoặc tạo bản ghi trong dimTimes cho ngày crawl.
-    Trả về time_id (YYYYMMDD dạng số).
-    """
+def get_or_create_dim_time(db, d: date) -> int:
     col = db[COL_DIM_TIMES]
-    time_id = date_to_time_id(target_date)
-
-    existing = col.find_one({"time_id": time_id})
-    if existing:
-        logger.info(f"📆 dim_time đã tồn tại: time_id={time_id}")
+    time_id = date_to_time_id(d)
+    if col.find_one({"time_id": time_id}):
         return time_id
-
-    # Tính toán thông tin ngày
     import calendar
-    year = target_date.year
-    month = target_date.month
-    day = target_date.day
-    weekday = target_date.weekday()  # 0=Monday … 6=Sunday
-    # Tuần trong năm theo ISO
-    week_of_year = target_date.isocalendar()[1]
-    quarter = (month - 1) // 3 + 1
-    # Ngày giao dịch: thứ 2–6, loại trừ ngày nghỉ lễ (đơn giản hoá)
-    is_trading_day = weekday < 5  # True nếu không phải T7/CN
-
     doc = {
         "time_id": time_id,
-        "full_date": datetime(year, month, day, 0, 0, 0),
-        "day": day,
-        "month": month,
-        "quarter": quarter,
-        "year": year,
-        "week_of_year": week_of_year,
-        "weekday": weekday,
-        "is_trading_day": is_trading_day,
+        "full_date": datetime(d.year, d.month, d.day),
+        "day": d.day, "month": d.month,
+        "quarter": (d.month - 1) // 3 + 1,
+        "year": d.year,
+        "week_of_year": d.isocalendar()[1],
+        "weekday": d.weekday(),
+        "is_trading_day": d.weekday() < 5,
         "created_at": datetime.utcnow(),
     }
-
     try:
         col.insert_one(doc)
-        logger.info(f"📆 Đã tạo dim_time mới: time_id={time_id}, is_trading_day={is_trading_day}")
+        logger.info(f"📆 Đã tạo dim_time: {time_id}")
     except Exception:
-        # Race condition: có thể record đã được tạo bởi process khác
-        logger.warning(f"⚠️  dim_time time_id={time_id} có thể đã tồn tại (bỏ qua lỗi insert)")
-
+        pass
     return time_id
 
 
-# ═══════════════════════════════════════════════════════
-# 5. TẠO / KIỂM TRA NGUỒN DỮ LIỆU TRONG dim_data_sources
-# ═══════════════════════════════════════════════════════
-def get_or_create_data_source(db, source_name: str = DATA_SOURCE_NAME) -> ObjectId:
-    """
-    Tìm hoặc tạo bản ghi nguồn dữ liệu trong dimDataSources.
-    Trả về ObjectId của data source.
-    """
+def get_or_create_data_source(db, name: str = DATA_SOURCE_NAME) -> ObjectId:
     col = db[COL_DIM_DATA_SOURCES]
-    existing = col.find_one({"name": source_name})
-
+    existing = col.find_one({"name": name})
     if existing:
-        logger.info(f"🔌 Data source '{source_name}' đã tồn tại: {existing['_id']}")
         return existing["_id"]
-
-    doc = {
-        "name": source_name,
-        "provider_type": DATA_SOURCE_PROVIDER_TYPE,
-        "base_url": "",
-        "description": DATA_SOURCE_DESCRIPTION,
+    result = col.insert_one({
+        "name": name, "provider_type": DATA_SOURCE_PROVIDER,
+        "base_url": "", "description": DATA_SOURCE_DESCRIPTION,
         "status": "active",
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
-    }
-
-    result = col.insert_one(doc)
-    logger.info(f"🔌 Đã tạo data source mới: '{source_name}' ({result.inserted_id})")
+        "created_at": datetime.utcnow(), "updated_at": datetime.utcnow(),
+    })
     return result.inserted_id
 
 
-# ═══════════════════════════════════════════════════════
-# 6. TẠO CRAWL LOG (bắt đầu session)
-# ═══════════════════════════════════════════════════════
 def create_crawl_log(db, time_id: int) -> ObjectId:
-    """
-    Tạo một bản ghi crawl_log cho phiên crawl hiện tại.
-    Trả về ObjectId của crawl log.
-    """
-    col = db[COL_CRAWL_LOGS]
-    doc = {
-        "crawl_job_id": None,  # manual crawl không có job định kỳ
-        "started_at": datetime.utcnow(),
-        "ended_at": None,
-        "status": "PENDING",
-        "records_fetched": 0,
-        "records_inserted": 0,
-        "records_updated": 0,
-        "records_failed": 0,
-        "error_message": f"Manual crawl cho ngày time_id={time_id}",
+    result = db[COL_CRAWL_LOGS].insert_one({
+        "crawl_job_id": None, "started_at": datetime.utcnow(),
+        "ended_at": None, "status": "PENDING",
+        "records_fetched": 0, "records_inserted": 0,
+        "records_updated": 0, "records_failed": 0,
+        "error_message": f"Manual crawl time_id={time_id}",
         "created_at": datetime.utcnow(),
-    }
-    result = col.insert_one(doc)
-    logger.info(f"📝 Tạo crawl_log: {result.inserted_id}")
+    })
     return result.inserted_id
 
 
-# ═══════════════════════════════════════════════════════
-# 7. GHI CRAWL LOG DETAIL (mỗi mã cổ phiếu)
-# ═══════════════════════════════════════════════════════
-def write_crawl_log_detail(
-    db,
-    crawl_log_id: ObjectId,
-    stock_id: ObjectId,
-    symbol: str,
-    status: str,
-    message: str = "",
-    data_type: str = "market_price",
-):
-    """
-    Ghi bản ghi chi tiết cho từng mã cổ phiếu vào crawlLogDetails.
-
-    Parameters:
-        status: 'SUCCESS' | 'FAILED' | 'SKIPPED'
-        data_type: loại dữ liệu đã crawl
-    """
-    col = db[COL_CRAWL_LOG_DETAILS]
-    doc = {
-        "crawl_log_id": crawl_log_id,
-        "stock_id": stock_id,
-        "symbol": symbol,
-        "data_type": data_type,
-        "status": status,
-        "message": message,
+def write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, status, message="", data_type="market_price"):
+    db[COL_CRAWL_LOG_DETAILS].insert_one({
+        "crawl_log_id": crawl_log_id, "stock_id": stock_id,
+        "symbol": symbol, "data_type": data_type,
+        "status": status, "message": message,
         "created_at": datetime.utcnow(),
-    }
-    col.insert_one(doc)
+    })
 
 
-# ═══════════════════════════════════════════════════════
-# 8. CẬP NHẬT CRAWL LOG (kết thúc session)
-# ═══════════════════════════════════════════════════════
-def finalize_crawl_log(
-    db,
-    crawl_log_id: ObjectId,
-    records_fetched: int,
-    records_inserted: int,
-    records_updated: int,
-    records_failed: int,
-    records_skipped: int,
-    status: str,
-):
-    """
-    Cập nhật bản ghi crawl_log khi hoàn thành session.
-    """
-    col = db[COL_CRAWL_LOGS]
-    update = {
-        "$set": {
-            "ended_at": datetime.utcnow(),
-            "status": status,
-            "records_fetched": records_fetched,
-            "records_inserted": records_inserted,
-            "records_updated": records_updated,
-            "records_failed": records_failed,
-            "error_message": f"Skipped: {records_skipped} mã không có dữ liệu",
-        }
-    }
-    col.update_one({"_id": crawl_log_id}, update)
-    logger.info(
-        f"📝 Cập nhật crawl_log {crawl_log_id}: status={status}, "
-        f"fetched={records_fetched}, inserted={records_inserted}, "
-        f"updated={records_updated}, failed={records_failed}, skipped={records_skipped}"
-    )
+def finalize_crawl_log(db, crawl_log_id, fetched, inserted, updated, failed, skipped, status):
+    db[COL_CRAWL_LOGS].update_one({"_id": crawl_log_id}, {"$set": {
+        "ended_at": datetime.utcnow(), "status": status,
+        "records_fetched": fetched, "records_inserted": inserted,
+        "records_updated": updated, "records_failed": failed,
+        "error_message": f"Skipped: {skipped}",
+    }})
 
 
-# ═══════════════════════════════════════════════════════
-# 9. GHI FACT CRAWL QUALITY
-# ═══════════════════════════════════════════════════════
-def write_fact_crawl_quality(
-    db,
-    data_source_id: ObjectId,
-    market_id: ObjectId | None,
-    time_id: int,
-    records_fetched: int,
-    records_inserted: int,
-    records_updated: int,
-    records_failed: int,
-    status: str,
-):
-    """
-    Ghi hoặc cập nhật bản ghi chất lượng crawl vào factCrawlQualities.
-    """
-    col = db[COL_FACT_CRAWL_QUALITIES]
-    total_processed = records_inserted + records_updated + records_failed
-    success_rate = (
-        round((records_inserted + records_updated) / total_processed * 100, 2)
-        if total_processed > 0
-        else 0.0
-    )
-
-    doc = {
-        "crawl_job_id": None,
-        "data_source_id": data_source_id,
-        "market_id": market_id,
-        "time_id": time_id,
-        "records_fetched": records_fetched,
-        "records_inserted": records_inserted,
-        "records_updated": records_updated,
-        "records_failed": records_failed,
-        "success_rate": success_rate,
-        "status": status,
+def write_fact_crawl_quality(db, data_source_id, market_id, time_id, fetched, inserted, updated, failed, status):
+    total = inserted + updated + failed
+    rate  = round((inserted + updated) / total * 100, 2) if total > 0 else 0.0
+    db[COL_FACT_CRAWL_QUALITY].insert_one({
+        "crawl_job_id": None, "data_source_id": data_source_id,
+        "market_id": market_id, "time_id": time_id,
+        "records_fetched": fetched, "records_inserted": inserted,
+        "records_updated": updated, "records_failed": failed,
+        "success_rate": rate, "status": status,
         "created_at": datetime.utcnow(),
-    }
-    col.insert_one(doc)
-    logger.info(
-        f"📊 Ghi fact_crawl_quality: status={status}, success_rate={success_rate}%, "
-        f"time_id={time_id}"
-    )
+    })
 
 
-def extract_historical_price_from_trading_stats(html: str, target_date: date) -> dict | None:
+# ═══════════════════════════════════════════════════════
+# 4. NGUỒN 1 – VIETSTOCK (Playwright)
+#    Lấy: OHLCV, market_cap, price_change, price_change_pct
+#    (giữ nguyên logic cũ, chỉ trả về dict chuẩn hoá)
+# ═══════════════════════════════════════════════════════
+def _parse_trading_stats_html(html: str, target_date: date) -> Optional[dict]:
+    """
+    Parse trang 'thong-ke-giao-dich.htm' của Vietstock.
+    Trả về dict OHLCV hoặc None nếu không tìm thấy ngày.
+    """
     soup = BeautifulSoup(html, "html.parser")
-    
-    # Target date formats: DD/MM/YYYY, D/M/YYYY, DD/MM/YY
-    target_date_str = target_date.strftime("%d/%m/%Y")
-    target_date_str_short = f"{target_date.day}/{target_date.month}/{target_date.year}"
-    target_date_str_yy = target_date.strftime("%d/%m/%y")
-    date_options = {target_date_str, target_date_str_short, target_date_str_yy}
-    
-    tables = soup.find_all("table")
-    for table in tables:
-        rows = table.find_all("tr")
-        for row in rows:
+    target_strs = {
+        target_date.strftime("%d/%m/%Y"),
+        f"{target_date.day}/{target_date.month}/{target_date.year}",
+        target_date.strftime("%d/%m/%y"),
+    }
+    for table in soup.find_all("table"):
+        for row in table.find_all("tr"):
             cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
-            if len(cells) < 12: # Expect at least 12 columns
+            if len(cells) < 12:
                 continue
-            date_cell = cells[1].strip() # Date is in column 1 (0-indexed 1)
-            if date_cell in date_options:
-                from vietstock_crawler.utils.number_utils import normalize_number
-                
-                close_val = normalize_number(cells[5])
-                open_val = normalize_number(cells[4])
-                high_val = normalize_number(cells[6])
-                low_val = normalize_number(cells[7])
-                ref_val = normalize_number(cells[3])
-                
-                # Volume khớp lệnh (triệu CP) -> multiply by 1,000,000
-                vol_val = normalize_number(cells[11])
-                if vol_val is not None:
-                    vol_val = int(vol_val * 1_000_000)
-                    
-                # Vốn hóa (tỷ đồng) -> multiply by 1,000,000,000
-                mc_val = normalize_number(cells[17])
-                if mc_val is not None:
-                    mc_val = mc_val * 1_000_000_000
-                    
-                # Price change
-                pc_val = normalize_number(cells[9])
-                pc_pct = normalize_number(cells[10])
-                
-                return {
-                    "open": open_val,
-                    "high": high_val,
-                    "low": low_val,
-                    "close": close_val,
-                    "reference": ref_val,
-                    "volume": vol_val,
-                    "market_cap": mc_val,
-                    "price_change": pc_val,
-                    "price_change_percent": pc_pct,
-                }
+            if cells[1].strip() not in target_strs:
+                continue
+
+            vol_raw = normalize_number(cells[11])
+            mc_raw  = normalize_number(cells[17]) if len(cells) > 17 else None
+
+            return {
+                "open_price":           normalize_number(cells[4]),
+                "high_price":           normalize_number(cells[6]),
+                "low_price":            normalize_number(cells[7]),
+                "close_price":          normalize_number(cells[5]),
+                "reference_price":      normalize_number(cells[3]),
+                "volume":               int(vol_raw * 1_000_000) if vol_raw is not None else None,
+                "market_cap":           mc_raw * 1_000_000_000   if mc_raw  is not None else None,
+                "price_change":         normalize_number(cells[9]),
+                "price_change_percent": normalize_number(cells[10]),
+            }
     return None
 
 
-def crawl_stock_data(symbol: str, target_date: date, browser: VietstockBrowser, slug: str, profile_url: str, stats_url: str) -> dict | None:
+def fetch_vietstock(
+    symbol: str,
+    target_date: date,
+    browser: VietstockBrowser,
+    slug: str,
+    profile_url: str,
+    stats_url: str,
+) -> dict:
     """
-    Crawl dữ liệu cổ phiếu bằng Playwright từ Vietstock.
-    Tương tự như crawler chính.
+    Lấy dữ liệu từ Vietstock qua Playwright.
+    Trả về dict (các key có thể None nếu không có dữ liệu).
     """
-    try:
-        is_today = (target_date == date.today())
-        
-        # 1. Cào trang profile chính để lấy định giá & chỉ số tài chính cơ bản
-        enable_financial = os.getenv("ENABLE_FINANCIAL_DATA", "false").lower() == "true"
-        market, financial = crawl_company(
-            symbol=symbol,
-            slug=slug,
-            browser=browser,
-            profile_url=profile_url,
-            crawl_financial=enable_financial
-        )
-        
-        if market.get("error") or not market.get("is_valid_url"):
-            raise RuntimeError(market.get("error") or "Không tải được trang profile")
-            
-        # 2. Cào trang thống kê giao dịch để tìm giá lịch sử của target_date
-        if not stats_url or "finance.vietstock.vn" not in stats_url:
-            stats_url = f"https://finance.vietstock.vn/{symbol.upper()}/thong-ke-giao-dich.htm"
-        html = browser.get_html(stats_url)
-        
-        hist_data = extract_historical_price_from_trading_stats(html, target_date)
-        if not hist_data:
-            return None
-            
-        # 3. Tổng hợp dữ liệu
-        result = {
-            "open_price": hist_data["open"],
-            "high_price": hist_data["high"],
-            "low_price": hist_data["low"],
-            "close_price": hist_data["close"],
-            "volume": hist_data["volume"],
-            "market_cap": hist_data["market_cap"],
-            "price_change": hist_data["price_change"],
-            "price_change_percent": hist_data["price_change_percent"],
-            
-            # Chỉ số tài chính lấy từ profile
-            "eps": market.get("eps"),
-            "pe": market.get("pe"),
+    result: dict = {}
+
+    # 4a. Profile page → chỉ số tài chính hiện tại
+    enable_financial = os.getenv("ENABLE_FINANCIAL_DATA", "false").lower() == "true"
+    market, financial = crawl_company(
+        symbol=symbol, slug=slug, browser=browser,
+        profile_url=profile_url, crawl_financial=enable_financial,
+    )
+    if not market.get("error") and market.get("is_valid_url"):
+        result.update({
+            "eps":        market.get("eps"),
+            "pe":         market.get("pe"),
             "forward_pe": market.get("forward_pe"),
-            "bvps": market.get("bvps"),
-            "pb": market.get("pb"),
-            "beta": market.get("beta"),
-            "roe": market.get("roe"),
-            "roaa": market.get("roaa"),
-            "ros": financial.get("ros"),
-        }
-        
-        # Khối lượng mua bán khớp lệnh & nước ngoài chỉ lấy khi crawl hôm nay
-        if is_today:
+            "bvps":       market.get("bvps"),
+            "pb":         market.get("pb"),
+            "beta":       market.get("beta"),
+            "roe":        market.get("roe"),
+            "roaa":       market.get("roaa"),
+            "ros":        financial.get("ros"),
+        })
+        # bid/ask & foreign chỉ lấy nếu crawl hôm nay
+        if target_date == date.today():
             result.update({
-                "bid_volume": market.get("bid_volume"),
-                "ask_volume": market.get("ask_volume"),
+                "bid_volume":  market.get("bid_volume"),
+                "ask_volume":  market.get("ask_volume"),
                 "foreign_buy": market.get("foreign_buy"),
-                "foreign_sell": market.get("foreign_sell"),
+                "foreign_sell":market.get("foreign_sell"),
                 "foreign_net": market.get("foreign_net"),
             })
-        else:
-            result.update({
-                "bid_volume": None,
-                "ask_volume": None,
-                "foreign_buy": None,
-                "foreign_sell": None,
-                "foreign_net": None,
-            })
-            
-        return result
-        
-    except Exception as e:
-        logger.error(f"  [{symbol}] Lỗi khi cào dữ liệu Playwright: {e}")
-        raise
+
+    # 4b. Trang thống kê giao dịch → OHLCV lịch sử
+    if not stats_url:
+        stats_url = f"https://finance.vietstock.vn/{symbol.lower()}/thong-ke-giao-dich.htm"
+    html = browser.get_html(stats_url)
+    ohlcv = _parse_trading_stats_html(html, target_date)
+    if ohlcv:
+        result.update(ohlcv)
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════
-# 11. MAPPING VÀ UPSERT VÀO fact_market_prices
+# 5. NGUỒN 2 – TCBS API (miễn phí, không cần đăng nhập)
+#    Endpoint chính thức của TCBS cho dữ liệu lịch sử
+#
+#    Lấy: close/open/high/low/volume (backup OHLCV),
+#         eps, pe, pb, roe, roaa, foreign_buy/sell/net
+# ═══════════════════════════════════════════════════════
+
+# Base URL TCBS
+_TCBS_BASE = "https://apipubaws.tcbs.com.vn"
+
+
+def _tcbs_get(path: str, params: dict | None = None) -> dict | list | None:
+    """Wrapper GET cho TCBS API, trả về JSON hoặc None nếu lỗi."""
+    url = f"{_TCBS_BASE}{path}"
+    try:
+        r = _session.get(url, params=params, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.debug(f"TCBS API lỗi [{path}]: {e}")
+        return None
+
+
+def fetch_tcbs_historical_price(symbol: str, target_date: date) -> dict:
+    """
+    Lấy OHLCV lịch sử từ TCBS stock-insight API.
+    Endpoint: /stock-insight/v2/stock/bars-long-term
+    Trả về dict các trường giá hoặc {} nếu không tìm thấy.
+    """
+    # Lấy 5 ngày xung quanh để tìm chính xác ngày target
+    from_ts = int(datetime(target_date.year, target_date.month, target_date.day).timestamp()) - 86400 * 3
+    to_ts   = from_ts + 86400 * 6
+
+    data = _tcbs_get("/stock-insight/v2/stock/bars-long-term", params={
+        "ticker": symbol.upper(),
+        "type":   "stock",
+        "resolution": "D",
+        "from": from_ts,
+        "to":   to_ts,
+    })
+
+    if not data or not isinstance(data, dict):
+        return {}
+
+    bars = data.get("data", [])
+    target_str = target_date.strftime("%Y-%m-%d")
+
+    for bar in bars:
+        # TCBS trả về timestamp (Unix) hoặc chuỗi ngày tuỳ endpoint version
+        bar_date = bar.get("tradingDate") or bar.get("date") or ""
+        if isinstance(bar_date, int):
+            bar_date = datetime.utcfromtimestamp(bar_date).strftime("%Y-%m-%d")
+        if bar_date[:10] != target_str:
+            continue
+
+        return {
+            "open_price":  _safe_float(bar.get("open")),
+            "high_price":  _safe_float(bar.get("high")),
+            "low_price":   _safe_float(bar.get("low")),
+            "close_price": _safe_float(bar.get("close")),
+            "volume":      _safe_int(bar.get("volume")),
+        }
+
+    return {}
+
+
+def fetch_tcbs_financials(symbol: str, target_date: date) -> dict:
+    """
+    Lấy chỉ số tài chính lịch sử từ TCBS.
+    Endpoint: /stock-insight/v1/finance/financialratio
+
+    Trả về dict: eps, pe, pb, roe, roaa, ros, beta,
+                 foreign_buy, foreign_sell, foreign_net
+    """
+    result: dict = {}
+
+    # ── Chỉ số định giá theo quý ──────────────────────────────────
+    # TCBS trả về list theo quý, tìm quý gần nhất với target_date
+    ratio_data = _tcbs_get("/stock-insight/v1/finance/financialratio", params={
+        "ticker": symbol.upper(),
+        "type":   "quarterly",
+        "size":   8,
+    })
+    if ratio_data and isinstance(ratio_data, dict):
+        items = ratio_data.get("data", [])
+        best  = _find_closest_quarterly(items, target_date)
+        if best:
+            result.update({
+                "eps":  _safe_float(best.get("eps")),
+                "pe":   _safe_float(best.get("pe")),
+                "pb":   _safe_float(best.get("pb")),
+                "roe":  _safe_float(best.get("roe")),
+                "roaa": _safe_float(best.get("roa")),
+                "ros":  _safe_float(best.get("ros")),
+                "beta": _safe_float(best.get("beta")),
+            })
+
+    # ── Giao dịch ngoại theo ngày ─────────────────────────────────
+    # TCBS có endpoint thống kê ngoại hàng ngày
+    foreign_data = _tcbs_get("/stock-insight/v1/stock/trade-stats", params={
+        "ticker": symbol.upper(),
+        "startDate": target_date.strftime("%Y-%m-%d"),
+        "endDate":   target_date.strftime("%Y-%m-%d"),
+    })
+    if foreign_data and isinstance(foreign_data, dict):
+        items = foreign_data.get("data", [])
+        if items:
+            row = items[0]
+            buy  = _safe_float(row.get("foreignBuyVolume") or row.get("buyForeignVolume"))
+            sell = _safe_float(row.get("foreignSellVolume") or row.get("sellForeignVolume"))
+            result.update({
+                "foreign_buy":  buy,
+                "foreign_sell": sell,
+                "foreign_net":  (buy - sell) if (buy is not None and sell is not None) else None,
+            })
+
+    return result
+
+
+def _find_closest_quarterly(items: list, target: date) -> dict | None:
+    """Tìm bản ghi quý gần nhất (không vượt quá) so với target_date."""
+    best = None
+    best_delta = None
+    for item in items:
+        q_str = item.get("reportDate") or item.get("yearReport", "")
+        try:
+            q_date = datetime.strptime(str(q_str)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if q_date > target:
+            continue
+        delta = (target - q_date).days
+        if best_delta is None or delta < best_delta:
+            best_delta = delta
+            best = item
+    return best
+
+
+# ═══════════════════════════════════════════════════════
+# 6. NGUỒN 3 – SSI iBoard API (miễn phí)
+#    Lấy: bid_volume, ask_volume, foreign (backup)
+#    Endpoint công khai của SSI không yêu cầu auth
+# ═══════════════════════════════════════════════════════
+
+_SSI_BASE = "https://iboard-query.ssi.com.vn"
+
+
+def _ssi_get(path: str, params: dict | None = None) -> dict | list | None:
+    url = f"{_SSI_BASE}{path}"
+    try:
+        r = _session.get(url, params=params, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.debug(f"SSI API lỗi [{path}]: {e}")
+        return None
+
+
+def fetch_ssi_intraday(symbol: str, target_date: date) -> dict:
+    """
+    Lấy dữ liệu khớp lệnh và ngoại từ SSI iBoard.
+    Chỉ có dữ liệu cho ngày trong phạm vi lưu trữ SSI (~60 ngày).
+    Trả về dict bid_volume, ask_volume, foreign_buy, foreign_sell, foreign_net
+    """
+    result: dict = {}
+
+    # SSI daily stock stat
+    data = _ssi_get("/v2/stock-price/stock-price", params={
+        "symbol":    symbol.upper(),
+        "startDate": target_date.strftime("%Y-%m-%d"),
+        "endDate":   target_date.strftime("%Y-%m-%d"),
+        "pageIndex": 1,
+        "pageSize":  1,
+        "language":  "vi",
+    })
+
+    if data and isinstance(data, dict):
+        rows = (
+            data.get("data", {}).get("stockPrices")
+            or data.get("data", [])
+        )
+        if rows and isinstance(rows, list):
+            row = rows[0]
+            buy  = _safe_float(row.get("foreignBuyVolume") or row.get("foreignBuyTrade"))
+            sell = _safe_float(row.get("foreignSellVolume") or row.get("foreignSellTrade"))
+            result.update({
+                "bid_volume":  _safe_float(row.get("totalBidVolume") or row.get("buyVolume")),
+                "ask_volume":  _safe_float(row.get("totalOfferVolume") or row.get("sellVolume")),
+                "foreign_buy":  buy,
+                "foreign_sell": sell,
+                "foreign_net":  (buy - sell) if (buy is not None and sell is not None) else None,
+            })
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════
+# 7. MERGE: kết hợp 3 nguồn với ưu tiên rõ ràng
+# ═══════════════════════════════════════════════════════
+
+# Mapping: field_name → [source_key_ưu_tiên_1, source_key_ưu_tiên_2, ...]
+# Mỗi value là tuple (dict_nguồn, key_trong_dict_đó) — xem hàm merge bên dưới
+FIELD_PRIORITY: dict[str, list[str]] = {
+    # OHLCV – Vietstock là nguồn chính, TCBS là fallback
+    "open_price":           ["vietstock", "tcbs_price"],
+    "high_price":           ["vietstock", "tcbs_price"],
+    "low_price":            ["vietstock", "tcbs_price"],
+    "close_price":          ["vietstock", "tcbs_price"],
+    "volume":               ["vietstock", "tcbs_price"],
+    "market_cap":           ["vietstock"],
+    "price_change":         ["vietstock"],
+    "price_change_percent": ["vietstock"],
+    # Chỉ số tài chính – TCBS API có lịch sử, Vietstock chỉ có hiện tại
+    "eps":        ["tcbs_fin", "vietstock"],
+    "pe":         ["tcbs_fin", "vietstock"],
+    "forward_pe": ["vietstock"],
+    "bvps":       ["vietstock"],
+    "pb":         ["tcbs_fin", "vietstock"],
+    "beta":       ["tcbs_fin", "vietstock"],
+    "roe":        ["tcbs_fin", "vietstock"],
+    "roaa":       ["tcbs_fin", "vietstock"],
+    "ros":        ["tcbs_fin", "vietstock"],
+    # Khối lượng đặt lệnh – SSI tốt nhất, Vietstock backup (chỉ hôm nay)
+    "bid_volume": ["ssi", "vietstock"],
+    "ask_volume": ["ssi", "vietstock"],
+    # Giao dịch ngoại – TCBS hoặc SSI, Vietstock backup
+    "foreign_buy":  ["tcbs_fin", "ssi", "vietstock"],
+    "foreign_sell": ["tcbs_fin", "ssi", "vietstock"],
+    "foreign_net":  ["tcbs_fin", "ssi", "vietstock"],
+}
+
+
+def merge_sources(
+    vietstock: dict,
+    tcbs_price: dict,
+    tcbs_fin: dict,
+    ssi: dict,
+) -> dict:
+    """
+    Kết hợp dữ liệu từ các nguồn theo bảng FIELD_PRIORITY.
+    Luôn ưu tiên nguồn đầu tiên có giá trị không None.
+    """
+    sources = {
+        "vietstock":  vietstock,
+        "tcbs_price": tcbs_price,
+        "tcbs_fin":   tcbs_fin,
+        "ssi":        ssi,
+    }
+    merged: dict = {}
+    for field, priority in FIELD_PRIORITY.items():
+        merged[field] = None
+        for src_name in priority:
+            val = sources.get(src_name, {}).get(field)
+            if val is not None:
+                merged[field] = val
+                break
+    return merged
+
+
+# ═══════════════════════════════════════════════════════
+# 8. CRAWL MỘT MÃ (orchestrator)
+# ═══════════════════════════════════════════════════════
+def crawl_single_stock(
+    symbol: str,
+    target_date: date,
+    browser: VietstockBrowser,
+    slug: str,
+    profile_url: str,
+    stats_url: str,
+) -> Optional[dict]:
+    """
+    Crawl đầy đủ dữ liệu cho một mã cổ phiếu từ tất cả nguồn.
+    Trả về dict đã merge, hoặc None nếu không có dữ liệu OHLCV cơ bản.
+    """
+    # Nguồn 1: Vietstock
+    vs_data: dict = {}
+    try:
+        vs_data = fetch_vietstock(symbol, target_date, browser, slug, profile_url, stats_url)
+    except Exception as e:
+        logger.warning(f"  [{symbol}] Vietstock lỗi: {e}")
+
+    # Nguồn 2a: TCBS giá lịch sử
+    tcbs_price: dict = {}
+    try:
+        tcbs_price = fetch_tcbs_historical_price(symbol, target_date)
+        if tcbs_price:
+            logger.debug(f"  [{symbol}] TCBS price OK")
+    except Exception as e:
+        logger.debug(f"  [{symbol}] TCBS price lỗi: {e}")
+
+    # Nguồn 2b: TCBS chỉ số tài chính
+    tcbs_fin: dict = {}
+    try:
+        tcbs_fin = fetch_tcbs_financials(symbol, target_date)
+        if tcbs_fin:
+            logger.debug(f"  [{symbol}] TCBS fin OK: {list(k for k,v in tcbs_fin.items() if v is not None)}")
+    except Exception as e:
+        logger.debug(f"  [{symbol}] TCBS fin lỗi: {e}")
+
+    # Nguồn 3: SSI
+    ssi_data: dict = {}
+    try:
+        ssi_data = fetch_ssi_intraday(symbol, target_date)
+        if ssi_data:
+            logger.debug(f"  [{symbol}] SSI OK")
+    except Exception as e:
+        logger.debug(f"  [{symbol}] SSI lỗi: {e}")
+
+    # Merge
+    merged = merge_sources(vs_data, tcbs_price, tcbs_fin, ssi_data)
+
+    # Bắt buộc phải có close_price mới tính là có dữ liệu
+    if merged.get("close_price") is None:
+        return None
+
+    # Log coverage
+    none_fields = [k for k, v in merged.items() if v is None]
+    if none_fields:
+        logger.debug(f"  [{symbol}] Trường còn None: {none_fields}")
+
+    return merged
+
+
+# ═══════════════════════════════════════════════════════
+# 9. MAP SANG SCHEMA + UPSERT
 # ═══════════════════════════════════════════════════════
 def map_to_fact_market_price(
-    raw_data: dict,
+    raw: dict,
     stock_id: ObjectId,
     market_id: ObjectId,
-    industry_id: ObjectId | None,
+    industry_id: Optional[ObjectId],
     data_source_id: ObjectId,
     time_id: int,
 ) -> dict:
-    """
-    Map dữ liệu crawl thô sang document schema của factMarketPrices.
-    """
     now = datetime.utcnow()
     return {
-        # Khoá ngoại
-        "stock_id": stock_id,
-        "market_id": market_id,
-        "industry_id": industry_id,
+        "stock_id":       stock_id,
+        "market_id":      market_id,
+        "industry_id":    industry_id,
         "data_source_id": data_source_id,
-        "time_id": time_id,
+        "time_id":        time_id,
 
-        # Giá OHLCV (bắt buộc)
-        "open_price": raw_data.get("open_price"),
-        "high_price": raw_data.get("high_price"),
-        "low_price": raw_data.get("low_price"),
-        "close_price": raw_data.get("close_price"),
-        "volume": raw_data.get("volume"),
+        "open_price":  raw.get("open_price"),
+        "high_price":  raw.get("high_price"),
+        "low_price":   raw.get("low_price"),
+        "close_price": raw.get("close_price"),
+        "volume":      raw.get("volume"),
 
-        # Khối lượng đặt lệnh
-        "bid_volume": raw_data.get("bid_volume"),
-        "ask_volume": raw_data.get("ask_volume"),
+        "bid_volume":  raw.get("bid_volume"),
+        "ask_volume":  raw.get("ask_volume"),
 
-        # Giao dịch ngoại
-        "foreign_buy": raw_data.get("foreign_buy"),
-        "foreign_sell": raw_data.get("foreign_sell"),
-        "foreign_net": raw_data.get("foreign_net"),
+        "foreign_buy":  raw.get("foreign_buy"),
+        "foreign_sell": raw.get("foreign_sell"),
+        "foreign_net":  raw.get("foreign_net"),
 
-        # Vốn hoá
-        "market_cap": raw_data.get("market_cap"),
+        "market_cap":  raw.get("market_cap"),
 
-        # Chỉ số định giá & tài chính
-        "eps": raw_data.get("eps"),
-        "pe": raw_data.get("pe"),
-        "forward_pe": raw_data.get("forward_pe"),
-        "bvps": raw_data.get("bvps"),
-        "pb": raw_data.get("pb"),
-        "beta": raw_data.get("beta"),
-        "ros": raw_data.get("ros"),
-        "roe": raw_data.get("roe"),
-        "roaa": raw_data.get("roaa"),
+        "eps":        raw.get("eps"),
+        "pe":         raw.get("pe"),
+        "forward_pe": raw.get("forward_pe"),
+        "bvps":       raw.get("bvps"),
+        "pb":         raw.get("pb"),
+        "beta":       raw.get("beta"),
+        "ros":        raw.get("ros"),
+        "roe":        raw.get("roe"),
+        "roaa":       raw.get("roaa"),
 
-        # Biến động giá
-        "price_change": raw_data.get("price_change"),
-        "price_change_percent": raw_data.get("price_change_percent"),
+        "price_change":         raw.get("price_change"),
+        "price_change_percent": raw.get("price_change_percent"),
 
-        # Metadata
         "crawled_at": now,
         "updated_at": now,
     }
 
 
 def upsert_fact_market_price(db, doc: dict) -> tuple[int, int]:
-    """
-    Upsert document vào factMarketPrices theo unique key:
-        stock_id + time_id + data_source_id
-
-    Trả về (inserted, updated) — mỗi giá trị là 0 hoặc 1.
-    """
     col = db[COL_FACT_MARKET_PRICES]
-    filter_query = {
-        "stock_id": doc["stock_id"],
-        "time_id": doc["time_id"],
+    filter_q = {
+        "stock_id":       doc["stock_id"],
+        "time_id":        doc["time_id"],
         "data_source_id": doc["data_source_id"],
     }
-
-    # Tách created_at ra khỏi $set để tránh ghi đè
     created_at = doc.pop("created_at", datetime.utcnow())
-
     result = col.update_one(
-        filter_query,
-        {
-            "$set": doc,
-            "$setOnInsert": {"created_at": created_at},
-        },
+        filter_q,
+        {"$set": doc, "$setOnInsert": {"created_at": created_at}},
         upsert=True,
     )
-
     if result.upserted_id:
-        return 1, 0  # inserted
-    elif result.modified_count > 0:
-        return 0, 1  # updated
-    else:
-        return 0, 0  # không thay đổi (dữ liệu giống hệt)
-
-
-# Các hàm helper vnstock cũ đã được xóa bỏ để sử dụng bộ Playwright tương ứng.
+        return 1, 0
+    if result.modified_count > 0:
+        return 0, 1
+    return 0, 0
 
 
 # ═══════════════════════════════════════════════════════
-# 12. MAIN FUNCTION
+# UTILS
+# ═══════════════════════════════════════════════════════
+def _safe_float(v) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _safe_int(v) -> Optional[int]:
+    try:
+        return int(float(v)) if v is not None else None
+    except (ValueError, TypeError):
+        return None
+
+
+def _get_or_create_stock_datasource(db, stock_id, symbol, is_dry_run) -> tuple[str, str, ObjectId]:
+    """Trả về (profile_url, stats_url, stock_ds_id)."""
+    ds_col = db["dimStockDataSources"]
+    ds = ds_col.find_one({"stock_id": stock_id})
+    if ds:
+        return (
+            ds.get("market_price_data_url", ""),
+            ds.get("trade_stats_url", ""),
+            ds["_id"],
+        )
+    sl = symbol.lower()
+    new_ds = {
+        "stock_id": stock_id,
+        "trade_stats_url":      f"https://finance.vietstock.vn/{sl}/thong-ke-giao-dich.htm",
+        "market_price_data_url":f"https://finance.vietstock.vn/{sl}-profile.htm",
+        "financial_data_url":   f"https://finance.vietstock.vn/{sl}-profile.htm",
+        "description": f"Auto-created for {symbol}",
+        "status": "active",
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+    if not is_dry_run:
+        res = ds_col.insert_one(new_ds)
+        ds_id = res.inserted_id
+    else:
+        ds_id = ObjectId()
+    logger.info(f"  [{symbol}] 🔌 Tự động tạo stock data source ({ds_id})")
+    return new_ds["market_price_data_url"], new_ds["trade_stats_url"], ds_id
+
+
+# ═══════════════════════════════════════════════════════
+# 10. MAIN
 # ═══════════════════════════════════════════════════════
 def main():
-    # ── Parse arguments ──
-    parser = argparse.ArgumentParser(
-        description="Crawl thủ công dữ liệu chứng khoán HOSE theo ngày bất kỳ."
-    )
-    parser.add_argument(
-        "--date",
-        required=True,
-        help="Ngày crawl theo định dạng YYYY-MM-DD. Ví dụ: 2026-05-22",
-    )
-    parser.add_argument(
-        "--source",
-        default=DATA_SOURCE_NAME,
-        help=f"Tên data source (mặc định: {DATA_SOURCE_NAME})",
-    )
-    parser.add_argument(
-        "--delay",
-        type=float,
-        default=0.5,
-        help="Thời gian chờ giữa các mã cổ phiếu (giây, mặc định: 0.5)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Chạy thử – crawl dữ liệu nhưng KHÔNG lưu vào database",
-    )
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=0,
-        help="Giới hạn số mã crawl (0 = không giới hạn, dùng để test)",
-    )
+    parser = argparse.ArgumentParser(description="Crawl thủ công dữ liệu HOSE theo ngày (multi-source).")
+    parser.add_argument("--date",    required=True, help="Ngày YYYY-MM-DD")
+    parser.add_argument("--source",  default=DATA_SOURCE_NAME)
+    parser.add_argument("--delay",   type=float, default=0.5, help="Delay giữa các mã (giây)")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--limit",   type=int, default=0, help="Giới hạn số mã (0 = không giới hạn)")
     args = parser.parse_args()
 
-    # ── Parse ngày ──
-    target_date = parse_date(args.date)
-    is_dry_run = args.dry_run
-    request_delay = args.delay
+    target_date  = parse_date(args.date)
+    is_dry_run   = args.dry_run
+    req_delay    = args.delay
 
     if is_dry_run:
-        logger.info("🔍 DRY RUN MODE – sẽ không lưu dữ liệu vào database")
+        logger.info("🔍 DRY RUN MODE – sẽ không lưu vào database")
 
-    # ── Kết nối MongoDB ──
     client, db = connect_mongodb()
 
     try:
-        # ── Lấy dim_data_source ──
         data_source_id = get_or_create_data_source(db, args.source) if not is_dry_run else ObjectId()
+        time_id        = get_or_create_dim_time(db, target_date)    if not is_dry_run else date_to_time_id(target_date)
+        stocks         = get_active_hose_stocks(db)
 
-        # ── Lấy time_id ──
-        time_id = get_or_create_dim_time(db, target_date) if not is_dry_run else date_to_time_id(target_date)
-
-        # ── Lấy danh sách cổ phiếu ──
-        stocks = get_active_hose_stocks(db)
         if not stocks:
-            logger.error("❌ Không tìm thấy mã cổ phiếu nào trong database. Hãy seed dữ liệu trước.")
+            logger.error("❌ Không có mã cổ phiếu nào trong DB. Seed dữ liệu trước.")
             sys.exit(1)
 
-        # Giới hạn số mã nếu có --limit
         if args.limit > 0:
-            stocks = stocks[: args.limit]
-            logger.info(f"🔧 Giới hạn test: chỉ crawl {len(stocks)} mã đầu tiên")
+            stocks = stocks[:args.limit]
+            logger.info(f"🔧 Giới hạn: {len(stocks)} mã")
 
-        # ── Tạo crawl log ──
         crawl_log_id = create_crawl_log(db, time_id) if not is_dry_run else ObjectId()
+        hose_market  = db[COL_DIM_MARKETS].find_one({"code": "HOSE"})
+        hose_id      = hose_market["_id"] if hose_market else None
 
-        # ── Lấy market_id của HOSE (dùng chung) ──
-        hose_market = db[COL_DIM_MARKETS].find_one({"code": "HOSE"})
-        hose_market_id = hose_market["_id"] if hose_market else None
-
-        # ── Counters ──
         total = len(stocks)
-        cnt_fetched = 0
-        cnt_inserted = 0
-        cnt_updated = 0
-        cnt_failed = 0
-        cnt_skipped = 0
+        cnt = {"fetched": 0, "inserted": 0, "updated": 0, "failed": 0, "skipped": 0}
 
         logger.info(f"\n{'═'*60}")
-        logger.info(f"🚀 Bắt đầu crawl {total} mã cổ phiếu HOSE ngày {target_date}")
+        logger.info(f"🚀 Bắt đầu crawl {total} mã – ngày {target_date}")
         logger.info(f"{'═'*60}\n")
 
-        # ── Vòng lặp crawl từng mã sử dụng Playwright ──
         with VietstockBrowser() as browser:
             for idx, stock in enumerate(stocks, start=1):
-                symbol = stock.get("symbol", "???")
-                stock_id = stock["_id"]
-                market_id = stock.get("market_id") or hose_market_id
+                symbol      = stock.get("symbol", "???")
+                stock_id    = stock["_id"]
+                market_id   = stock.get("market_id") or hose_id
                 industry_id = stock.get("industry_id")
-                slug = stock.get("slug") or symbol.lower()
+                slug        = stock.get("slug") or symbol.lower()
 
-                logger.info(f"[{idx}/{total}] ▶ {symbol} ...")
+                logger.info(f"[{idx}/{total}] ▶ {symbol}")
 
                 try:
-                    # Retrieve or create stock data source details from DB
-                    ds_col = db["dimStockDataSources"]
-                    ds = ds_col.find_one({"stock_id": stock_id})
-                    
-                    market_price_data_url = ""
-                    stock_data_source_id = None
-                    trade_stats_url = ""
-                    
-                    if ds:
-                        market_price_data_url = ds.get("market_price_data_url", "")
-                        stock_data_source_id = ds["_id"]
-                        trade_stats_url = ds.get("trade_stats_url", "")
-                    else:
-                        # Auto-create stock data source if missing to avoid bootstrap failures
-                        symbol_lower = symbol.lower()
-                        new_ds = {
-                            "stock_id": stock_id,
-                            "trade_stats_url": f"https://finance.vietstock.vn/{symbol_lower}/thong-ke-giao-dich.htm",
-                            "market_price_data_url": f"https://finance.vietstock.vn/{symbol_lower}-profile.htm",
-                            "financial_data_url": f"https://finance.vietstock.vn/{symbol_lower}-profile.htm",
-                            "description": f"Vietstock crawl URLs for {symbol}",
-                            "status": "active",
-                            "created_at": datetime.utcnow(),
-                            "updated_at": datetime.utcnow()
-                        }
-                        if not is_dry_run:
-                            res = ds_col.insert_one(new_ds)
-                            stock_data_source_id = res.inserted_id
-                        else:
-                            stock_data_source_id = ObjectId()
-                        market_price_data_url = new_ds["market_price_data_url"]
-                        trade_stats_url = new_ds["trade_stats_url"]
-                        logger.info(f"  [{symbol}] 🔌 Tự động tạo stock data source mới (ID: {stock_data_source_id})")
-
-                    # Skip crawling if market_price_data_url is empty/null
-                    if not market_price_data_url:
-                        logger.warning(f"  [{symbol}] Missing market_price_data_url -> SKIPPED")
-                        cnt_skipped += 1
-                        if not is_dry_run:
-                            write_crawl_log_detail(
-                                db, crawl_log_id, stock_id, symbol,
-                                status="SKIPPED",
-                                message="Missing market_price_data_url",
-                            )
-                        continue
-
-                    # Use stock-specific data_source_id as the primary data_source_id for factMarketPrices
-                    current_ds_id = stock_data_source_id or data_source_id
-
-                    # ── Crawl dữ liệu ──
-                    raw_data = crawl_stock_data(symbol, target_date, browser, slug, market_price_data_url, trade_stats_url)
-
-                    if raw_data is None:
-                        logger.warning(f"  [{symbol}] Không có dữ liệu cho ngày {target_date} → SKIPPED")
-                        cnt_skipped += 1
-                        if not is_dry_run:
-                            write_crawl_log_detail(
-                                db, crawl_log_id, stock_id, symbol,
-                                status="SKIPPED",
-                                message=f"Không có dữ liệu cho ngày {target_date}",
-                            )
-                        continue
-
-                    cnt_fetched += 1
-
-                    if is_dry_run:
-                        logger.info(f"  [{symbol}] ✅ [DRY RUN] Dữ liệu: {raw_data}")
-                        cnt_inserted += 1  # tính là sẽ insert
-                        continue
-
-                    # ── Map sang schema ──
-                    fact_doc = map_to_fact_market_price(
-                        raw_data=raw_data,
-                        stock_id=stock_id,
-                        market_id=market_id,
-                        industry_id=industry_id,
-                        data_source_id=current_ds_id,
-                        time_id=time_id,
+                    profile_url, stats_url, ds_id = _get_or_create_stock_datasource(
+                        db, stock_id, symbol, is_dry_run
                     )
 
-                    # ── Upsert vào DB ──
-                    inserted, updated = upsert_fact_market_price(db, fact_doc)
-                    cnt_inserted += inserted
-                    cnt_updated += updated
+                    if not profile_url:
+                        logger.warning(f"  [{symbol}] Thiếu profile_url → SKIPPED")
+                        cnt["skipped"] += 1
+                        if not is_dry_run:
+                            write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "SKIPPED", "Missing profile_url")
+                        continue
 
-                    action = "INSERT" if inserted else ("UPDATE" if updated else "UNCHANGED")
-                    logger.info(f"  [{symbol}] ✅ {action}")
+                    raw = crawl_single_stock(symbol, target_date, browser, slug, profile_url, stats_url)
 
-                    # ── Ghi log chi tiết ──
+                    if raw is None:
+                        logger.warning(f"  [{symbol}] Không có dữ liệu ngày {target_date} → SKIPPED")
+                        cnt["skipped"] += 1
+                        if not is_dry_run:
+                            write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "SKIPPED",
+                                                   f"No data for {target_date}")
+                        continue
+
+                    cnt["fetched"] += 1
+
+                    # Tóm tắt coverage
+                    filled   = sum(1 for v in raw.values() if v is not None)
+                    total_f  = len(raw)
+                    coverage = f"{filled}/{total_f} trường"
+
+                    if is_dry_run:
+                        logger.info(f"  [{symbol}] ✅ [DRY RUN] {coverage} | close={raw.get('close_price')}")
+                        cnt["inserted"] += 1
+                        continue
+
+                    fact_doc = map_to_fact_market_price(
+                        raw, stock_id, market_id, industry_id, ds_id, time_id
+                    )
+                    ins, upd = upsert_fact_market_price(db, fact_doc)
+                    cnt["inserted"] += ins
+                    cnt["updated"]  += upd
+
+                    action = "INSERT" if ins else ("UPDATE" if upd else "UNCHANGED")
+                    logger.info(f"  [{symbol}] ✅ {action} | {coverage} | close={raw.get('close_price')}")
+
                     write_crawl_log_detail(
-                        db, crawl_log_id, stock_id, symbol,
-                        status="SUCCESS",
-                        message=f"{action}: open={raw_data.get('open_price')}, close={raw_data.get('close_price')}, vol={raw_data.get('volume')}",
+                        db, crawl_log_id, stock_id, symbol, "SUCCESS",
+                        f"{action}: {coverage}, close={raw.get('close_price')}, vol={raw.get('volume')}",
                     )
 
                 except Exception as exc:
-                    cnt_failed += 1
-                    err_msg = str(exc)
-                    logger.error(f"  [{symbol}] ❌ FAILED: {err_msg}")
+                    cnt["failed"] += 1
+                    logger.error(f"  [{symbol}] ❌ FAILED: {exc}")
                     if not is_dry_run:
-                        write_crawl_log_detail(
-                            db, crawl_log_id, stock_id, symbol,
-                            status="FAILED",
-                            message=err_msg[:500],  # giới hạn độ dài message
-                        )
+                        write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "FAILED", str(exc)[:500])
 
-                # ── Delay giữa các mã ──
-                if request_delay > 0 and idx < total:
-                    time.sleep(request_delay)
+                if req_delay > 0 and idx < total:
+                    time.sleep(req_delay)
 
-        # ── Xác định trạng thái tổng ──
-        if cnt_failed == 0 and cnt_fetched > 0:
+        # Xác định trạng thái cuối
+        if cnt["failed"] == 0 and cnt["fetched"] > 0:
             final_status = "SUCCESS"
-        elif cnt_fetched == 0 and cnt_failed == 0:
-            final_status = "FAILED"  # toàn bộ bị SKIPPED = không có dữ liệu
-        elif cnt_failed > 0 and (cnt_inserted + cnt_updated) == 0:
+        elif cnt["fetched"] == 0 and cnt["failed"] == 0:
             final_status = "FAILED"
-        elif cnt_failed > 0:
+        elif cnt["failed"] > 0 and (cnt["inserted"] + cnt["updated"]) == 0:
+            final_status = "FAILED"
+        elif cnt["failed"] > 0:
             final_status = "PARTIAL_SUCCESS"
         else:
             final_status = "SUCCESS"
 
-        # ── In tóm tắt ──
         logger.info(f"\n{'═'*60}")
         logger.info(f"📋 KẾT QUẢ CRAWL NGÀY {target_date}")
         logger.info(f"{'═'*60}")
-        logger.info(f"  Tổng số mã        : {total}")
-        logger.info(f"  Crawl thành công  : {cnt_fetched}")
-        logger.info(f"  Bỏ qua (no data)  : {cnt_skipped}")
-        logger.info(f"  Lỗi               : {cnt_failed}")
-        logger.info(f"  Insert mới        : {cnt_inserted}")
-        logger.info(f"  Cập nhật          : {cnt_updated}")
-        logger.info(f"  Trạng thái        : {final_status}")
+        logger.info(f"  Tổng số mã      : {total}")
+        logger.info(f"  Crawl OK        : {cnt['fetched']}")
+        logger.info(f"  Skipped         : {cnt['skipped']}")
+        logger.info(f"  Lỗi             : {cnt['failed']}")
+        logger.info(f"  Insert mới      : {cnt['inserted']}")
+        logger.info(f"  Cập nhật        : {cnt['updated']}")
+        logger.info(f"  Trạng thái      : {final_status}")
         logger.info(f"{'═'*60}\n")
 
         if not is_dry_run:
-            # ── Finalize crawl_log ──
             finalize_crawl_log(
-                db=db,
-                crawl_log_id=crawl_log_id,
-                records_fetched=cnt_fetched,
-                records_inserted=cnt_inserted,
-                records_updated=cnt_updated,
-                records_failed=cnt_failed,
-                records_skipped=cnt_skipped,
-                status=final_status,
+                db, crawl_log_id,
+                cnt["fetched"], cnt["inserted"], cnt["updated"], cnt["failed"], cnt["skipped"],
+                final_status,
             )
-
-            # ── Ghi fact_crawl_quality ──
             write_fact_crawl_quality(
-                db=db,
-                data_source_id=data_source_id,
-                market_id=hose_market_id,
-                time_id=time_id,
-                records_fetched=cnt_fetched,
-                records_inserted=cnt_inserted,
-                records_updated=cnt_updated,
-                records_failed=cnt_failed,
-                status=final_status,
+                db, data_source_id, hose_id, time_id,
+                cnt["fetched"], cnt["inserted"], cnt["updated"], cnt["failed"],
+                final_status,
             )
 
     finally:
@@ -872,8 +918,5 @@ def main():
         logger.info("🔒 Đã đóng kết nối MongoDB")
 
 
-# ═══════════════════════════════════════════════════════
-# ENTRY POINT
-# ═══════════════════════════════════════════════════════
 if __name__ == "__main__":
     main()
