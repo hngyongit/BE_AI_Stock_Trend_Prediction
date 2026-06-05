@@ -158,7 +158,10 @@ def merge_missing_fields(base: dict[str, Any], incoming: dict[str, Any] | None) 
     for key, value in incoming.items():
         if key in {"source_used", "provider_errors"}:
             continue
-        if is_empty(base.get(key)) and not is_empty(value):
+        # Cho phép ghi đè volume = 0 bằng giá trị thực > 0 từ nguồn khác
+        if key == "volume" and base.get(key) == 0 and not is_empty(value) and value > 0:
+            base[key] = value
+        elif is_empty(base.get(key)) and not is_empty(value):
             base[key] = value
     return base
 
