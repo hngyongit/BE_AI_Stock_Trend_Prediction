@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import time
 from datetime import datetime
 from typing import Any, Dict, List
+from bson.objectid import ObjectId
 
 from vietstock_crawler.config.settings import get_settings
 from vietstock_crawler.core.browser import VietstockBrowser
@@ -28,6 +30,202 @@ from vietstock_crawler.utils.date_utils import (
 )
 from vietstock_crawler.utils.text_utils import clean_config_text
 from vietstock_crawler.utils.url_utils import normalize_slug_value
+
+
+def crawl_single_stock_daily(
+    item: dict[str, Any],
+    idx: int,
+    symbols_count: int,
+    settings: Any,
+    db_service: MongoDBService,
+    run_trading_stats: bool,
+    data_source_id: ObjectId | None,
+    log_id: ObjectId | None,
+    timeout: float | None = None
+) -> dict[str, Any]:
+    """
+    Crawls a single stock symbol for the daily job and records it.
+    Uses its own VietstockBrowser session for thread-safety.
+    """
+    symbol = clean_config_text(item.get("symbol")).upper()
+    slug = normalize_slug_value(item.get("slug"))
+
+    if not symbol:
+        return {"status": "SKIPPED", "message": "Symbol is empty"}
+
+    stock_id = item.get("stock_id")
+    market_id = item.get("market_id")
+    industry_id = item.get("industry_id")
+    
+    # Retrieve or create stock data source details from DB if connected
+    market_price_data_url = ""
+    stock_data_source_id = item.get("data_source_id") or data_source_id
+    
+    if db_service.is_connected():
+        # 1. Resolve stock_id, market_id, industry_id if missing
+        if not stock_id:
+            s_doc = db_service.db["dimstocks"].find_one({"symbol": symbol})
+            if s_doc:
+                stock_id = s_doc["_id"]
+                market_id = s_doc.get("market_id")
+                industry_id = s_doc.get("industry_id")
+            else:
+                # Auto-create stock if not found
+                hose = db_service.db["dimMarkets"].find_one({"code": "HOSE"})
+                market_id = hose["_id"] if hose else None
+                new_stock = {
+                    "market_id": market_id,
+                    "industry_id": None,
+                    "symbol": symbol,
+                    "company_name": symbol,
+                    "status": "ACTIVE",
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+                res = db_service.db["dimstocks"].insert_one(new_stock)
+                stock_id = res.inserted_id
+                logging.info(f"[MongoDB] Tự động tạo Stock mới cho {symbol} (ID: {stock_id})")
+        
+        # 2. Get data_source_id and market_price_data_url
+        resolved_ds_id, market_price_data_url = db_service.get_or_create_stock_data_source(stock_id, symbol)
+        if resolved_ds_id:
+            stock_data_source_id = resolved_ds_id
+    else:
+        # If not connected, use the URLs from configs or fallback
+        market_price_data_url = item.get("market_price_data_url") or item.get("profile_url") or f"https://finance.vietstock.vn/{slug}.htm"
+
+    # Skip checking/crawling if market_price_data_url is empty/null
+    if not market_price_data_url:
+        logging.warning(f"  [{symbol}] Missing market_price_data_url -> SKIPPED")
+        if settings.save_to_mongodb and db_service.is_connected() and log_id:
+            db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SKIPPED", "Missing market_price_data_url")
+        return {"status": "SKIPPED", "message": "Missing market_price_data_url"}
+
+    # Retrieve or construct trading_stats_url
+    trading_stats_url = item.get("trading_stats_url")
+    if not trading_stats_url and db_service.is_connected() and stock_id:
+        ds = db_service.db["dimStockDataSources"].find_one({"stock_id": stock_id})
+        if ds:
+            trading_stats_url = ds.get("trade_stats_url", "")
+    if not trading_stats_url or "finance.vietstock.vn" not in trading_stats_url:
+        trading_stats_url = f"https://finance.vietstock.vn/{symbol.lower()}/thong-ke-giao-dich.htm"
+
+    logging.info(f"=== [{idx}/{symbols_count}] Crawling {symbol} ===")
+    
+    with VietstockBrowser(timeout=timeout) as browser:
+        # 4. Thực hiện crawl
+        market, financial = crawl_company(
+            symbol=symbol,
+            slug=slug,
+            browser=browser,
+            profile_url=market_price_data_url,
+            crawl_financial=settings.enable_financial_data,
+        )
+        
+        # Check for immediate crawl errors (if crawl_company failed completely)
+        if market.get("error") or not market.get("is_valid_url"):
+            # Raise exception so we can capture it and retry
+            raise RuntimeError(market.get("error") or "Không tải được trang profile")
+            
+        stats = None
+        if settings.enable_trading_stats and run_trading_stats:
+            stats = crawl_trading_stats(symbol=symbol, browser=browser, trading_stats_url=trading_stats_url)
+            if stats and (stats.get("error") or not stats.get("is_valid_url")):
+                raise RuntimeError(stats.get("error") or "Không tải được trang trading stats")
+
+        # In kết quả crawl chi tiết lên terminal
+        logging.info(f"  [{symbol}] Dữ liệu Market: {market}")
+        if settings.enable_financial_data:
+            logging.info(f"  [{symbol}] Dữ liệu Financial: {financial}")
+        if stats:
+            logging.info(f"  [{symbol}] Dữ liệu Trading: {stats}")
+
+        # 5. Lưu MongoDB trực tiếp cho từng stock
+        cnt_inserted = 0
+        cnt_updated = 0
+        cnt_failed = 0
+        
+        if settings.save_to_mongodb and db_service.is_connected() and log_id:
+            # Ghi Market Price
+            if market.get("is_valid_url") and not market.get("error"):
+                if stats and stats.get("is_valid_url") and not stats.get("error"):
+                    market["price_change"] = stats.get("period_price_change_value")
+                    market["price_change_percent"] = stats.get("period_price_change_pct")
+
+                status_mp = db_service.save_market_price(market, stock_id, market_id, industry_id, stock_data_source_id)
+                if status_mp == "INSERT":
+                    cnt_inserted += 1
+                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SUCCESS", "Thành công")
+                elif status_mp == "UPDATE":
+                    cnt_updated += 1
+                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SUCCESS", "Thành công")
+                else:
+                    cnt_failed += 1
+                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "FAILED", market.get("error") or "Lưu DB thất bại")
+            else:
+                cnt_failed += 1
+                err_msg = market.get("error") or "Invalid URL"
+                db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "FAILED", err_msg)
+
+            # Ghi Financial Statement
+            if settings.enable_financial_data:
+                if financial.get("is_valid_url") and not financial.get("error"):
+                    status_fs = db_service.save_financial_statement(financial, stock_id, stock_data_source_id)
+                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "QUARTERLY_FINANCIAL_STATEMENT", "SUCCESS", "Thành công")
+                else:
+                    err_msg = financial.get("error") or "Invalid URL"
+                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "QUARTERLY_FINANCIAL_STATEMENT", "FAILED", err_msg)
+
+            # Ghi BCTT (Financial Report Source) từ stats tab BCTT
+            if stats and stats.get("bctt_latest_period") and not stats.get("error"):
+                status_rep = db_service.save_financial_report_source(stats, stock_id, stock_data_source_id)
+                if status_rep != "SKIPPED":
+                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "FINANCIAL_REPORT_SOURCE", "SUCCESS", "Thành công BCTT")
+
+        return {
+            "status": "SUCCESS",
+            "market": market,
+            "financial": financial,
+            "stats": stats,
+            "inserted": cnt_inserted,
+            "updated": cnt_updated,
+            "failed": cnt_failed
+        }
+
+
+def crawl_symbol_daily_with_timeout(
+    item: dict[str, Any],
+    idx: int,
+    symbols_count: int,
+    settings: Any,
+    db_service: MongoDBService,
+    run_trading_stats: bool,
+    data_source_id: ObjectId | None,
+    log_id: ObjectId | None,
+    timeout: float = 25.0
+) -> dict[str, Any]:
+    """
+    Runs the daily crawl function inside a ThreadPoolExecutor with a hard timeout.
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(
+        crawl_single_stock_daily,
+        item=item,
+        idx=idx,
+        symbols_count=symbols_count,
+        settings=settings,
+        db_service=db_service,
+        run_trading_stats=run_trading_stats,
+        data_source_id=data_source_id,
+        log_id=log_id,
+        timeout=timeout
+    )
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        raise TimeoutError(f"Timeout > {timeout}s")
+    finally:
+        executor.shutdown(wait=False)
 
 
 def run() -> None:
@@ -132,162 +330,152 @@ def run() -> None:
     financial_records: List[Dict[str, Any]] = []
     trading_records: List[Dict[str, Any]] = []
 
+    # Tracking states
+    success_first: List[str] = []
+    success_retry: List[str] = []
+    failed_retry: List[str] = []
+    skipped_list: List[str] = []
+    
+    retry_symbols: List[Dict[str, Any]] = []
+
     # Biến thống kê log
     records_fetched = 0
     records_inserted = 0
     records_updated = 0
     records_failed = 0
 
-    with VietstockBrowser() as browser:
-        for idx, item in enumerate(configs, start=1):
-            symbol = clean_config_text(item.get("symbol")).upper()
-            slug = normalize_slug_value(item.get("slug"))
-            
-            if not symbol:
-                continue
+    # Main Queue Execution
+    for idx, item in enumerate(configs, start=1):
+        symbol = clean_config_text(item.get("symbol")).upper()
+        if not symbol:
+            continue
 
-            stock_id = item.get("stock_id")
-            market_id = item.get("market_id")
-            industry_id = item.get("industry_id")
-            
-            # Retrieve or create stock data source details from DB if connected
-            market_price_data_url = ""
-            data_source_id = item.get("data_source_id")
-            
-            if db_service.is_connected():
-                # 1. Resolve stock_id, market_id, industry_id if missing
-                if not stock_id:
-                    s_doc = db_service.db["dimstocks"].find_one({"symbol": symbol})
-                    if s_doc:
-                        stock_id = s_doc["_id"]
-                        market_id = s_doc.get("market_id")
-                        industry_id = s_doc.get("industry_id")
-                    else:
-                        # Auto-create stock if not found
-                        hose = db_service.db["dimMarkets"].find_one({"code": "HOSE"})
-                        market_id = hose["_id"] if hose else None
-                        new_stock = {
-                            "market_id": market_id,
-                            "industry_id": None,
-                            "symbol": symbol,
-                            "company_name": symbol,
-                            "status": "ACTIVE",
-                            "created_at": datetime.utcnow(),
-                            "updated_at": datetime.utcnow()
-                        }
-                        res = db_service.db["dimstocks"].insert_one(new_stock)
-                        stock_id = res.inserted_id
-                        logging.info(f"[MongoDB] Tự động tạo Stock mới cho {symbol} (ID: {stock_id})")
-                
-                # 2. Get data_source_id and market_price_data_url
-                data_source_id, market_price_data_url = db_service.get_or_create_stock_data_source(stock_id, symbol)
-            else:
-                # If not connected, use the URLs from configs or fallback
-                market_price_data_url = item.get("market_price_data_url") or item.get("profile_url") or f"https://finance.vietstock.vn/{slug}.htm"
-                data_source_id = None
+        start_time = time.time()
+        try:
+            result = crawl_symbol_daily_with_timeout(
+                item=item,
+                idx=idx,
+                symbols_count=symbols_count,
+                settings=settings,
+                db_service=db_service,
+                run_trading_stats=run_trading_stats,
+                data_source_id=data_source_id,
+                log_id=log_id,
+                timeout=settings.symbol_crawl_timeout
+            )
+            if result["status"] == "SUCCESS":
+                success_first.append(symbol)
+                market_records.append(result["market"])
+                if settings.enable_financial_data:
+                    financial_records.append(result["financial"])
+                if result["stats"]:
+                    trading_records.append(result["stats"])
 
-            # Skip checking/crawling if market_price_data_url is empty/null
-            if not market_price_data_url:
-                logging.warning(f"  [{symbol}] Missing market_price_data_url -> SKIPPED")
-                if settings.save_to_mongodb and db_service.is_connected() and log_id:
-                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SKIPPED", "Missing market_price_data_url")
-                continue
-
-            # Retrieve or construct trading_stats_url
-            trading_stats_url = item.get("trading_stats_url")
-            if not trading_stats_url and db_service.is_connected() and stock_id:
-                ds = db_service.db["dimStockDataSources"].find_one({"stock_id": stock_id})
-                if ds:
-                    trading_stats_url = ds.get("trade_stats_url", "")
-            if not trading_stats_url or "finance.vietstock.vn" not in trading_stats_url:
-                trading_stats_url = f"https://finance.vietstock.vn/{symbol.lower()}/thong-ke-giao-dich.htm"
-
-            logging.info(f"=== [{idx}/{symbols_count}] Crawling {symbol} ===")
-            
-            try:
-                # 4. Thực hiện crawl
-                market, financial = crawl_company(
-                    symbol=symbol,
-                    slug=slug,
-                    browser=browser,
-                    profile_url=market_price_data_url,
-                    crawl_financial=settings.enable_financial_data,
-                )
-                
                 records_fetched += 1
-                
-                stats = None
-                if settings.enable_trading_stats and run_trading_stats:
-                    stats = crawl_trading_stats(symbol=symbol, browser=browser, trading_stats_url=trading_stats_url)
+                records_inserted += result.get("inserted", 0)
+                records_updated += result.get("updated", 0)
+                records_failed += result.get("failed", 0)
+            elif result["status"] == "SKIPPED":
+                skipped_list.append(symbol)
 
-                # Thu thập records cho GSheet (nếu cần)
-                market_records.append(market)
-                if settings.enable_financial_data:
-                    financial_records.append(financial)
-                if stats:
-                    trading_records.append(stats)
+        except Exception as exc:
+            execution_time = time.time() - start_time
+            err_msg = str(exc)
+            if isinstance(exc, TimeoutError) or "Timeout >" in err_msg:
+                logging.warning(f"  [{symbol}] TIMEOUT after {execution_time:.1f}s")
+                reason = "timeout"
+            else:
+                logging.warning(f"  [{symbol}] ERROR after {execution_time:.1f}s: {err_msg}")
+                reason = err_msg
 
-                # In kết quả crawl chi tiết lên terminal
-                logging.info(f"  [{symbol}] Dữ liệu Market: {market}")
-                if settings.enable_financial_data:
-                    logging.info(f"  [{symbol}] Dữ liệu Financial: {financial}")
-                if stats:
-                    logging.info(f"  [{symbol}] Dữ liệu Trading: {stats}")
+            retry_symbols.append({
+                "symbol": symbol,
+                "reason": reason,
+                "attempt": 2,
+                "item": item
+            })
 
-                # 5. Lưu MongoDB trực tiếp cho từng stock
-                if settings.save_to_mongodb and db_service.is_connected() and log_id:
-                    # Ghi Market Price
-                    if market.get("is_valid_url") and not market.get("error"):
-                        # Trộn thông tin trading stats nếu có vào market record để lưu factMarketPrices đầy đủ
-                        # (Theo ERD: fact_market_prices gồm đầy đủ chỉ số định giá, giao dịch, biến động giá)
-                        if stats and stats.get("is_valid_url") and not stats.get("error"):
-                            # Map các field stats
-                            market["price_change"] = stats.get("period_price_change_value")
-                            market["price_change_percent"] = stats.get("period_price_change_pct")
+        if settings.request_delay_seconds > 0 and idx < symbols_count:
+            time.sleep(settings.request_delay_seconds)
 
-                        status_mp = db_service.save_market_price(market, stock_id, market_id, industry_id, data_source_id)
-                        if status_mp == "INSERT":
-                            records_inserted += 1
-                            db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SUCCESS", "Thành công")
-                        elif status_mp == "UPDATE":
-                            records_updated += 1
-                            db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SUCCESS", "Thành công")
-                        else:
-                            records_failed += 1
-                            db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "FAILED", market.get("error") or "Lưu DB thất bại")
-                    else:
-                        records_failed += 1
-                        err_msg = market.get("error") or "Invalid URL"
-                        db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "FAILED", err_msg)
+    # Retry Phase
+    if retry_symbols:
+        logging.info("\n" + "═" * 70)
+        logging.info("=== RETRY PHASE START ===")
+        logging.info("═" * 70 + "\n")
 
-                    # Ghi Financial Statement
+        while retry_symbols:
+            retry_item = retry_symbols.pop(0)
+            symbol = retry_item["symbol"]
+            attempt = retry_item["attempt"]
+            item = retry_item["item"]
+            reason = retry_item["reason"]
+            stock_id = item.get("stock_id")
+
+            logging.info(f"[{symbol}] Retry {attempt}/3")
+
+            start_time = time.time()
+            try:
+                result = crawl_symbol_daily_with_timeout(
+                    item=item,
+                    idx=attempt,
+                    symbols_count=3,
+                    settings=settings,
+                    db_service=db_service,
+                    run_trading_stats=run_trading_stats,
+                    data_source_id=data_source_id,
+                    log_id=log_id,
+                    timeout=settings.symbol_crawl_timeout
+                )
+                if result["status"] == "SUCCESS":
+                    success_retry.append(symbol)
+                    market_records.append(result["market"])
                     if settings.enable_financial_data:
-                        if financial.get("is_valid_url") and not financial.get("error"):
-                            status_fs = db_service.save_financial_statement(financial, stock_id, data_source_id)
-                            db_service.write_crawl_log_detail(log_id, stock_id, symbol, "QUARTERLY_FINANCIAL_STATEMENT", "SUCCESS", "Thành công")
-                        else:
-                            err_msg = financial.get("error") or "Invalid URL"
-                            db_service.write_crawl_log_detail(log_id, stock_id, symbol, "QUARTERLY_FINANCIAL_STATEMENT", "FAILED", err_msg)
+                        financial_records.append(result["financial"])
+                    if result["stats"]:
+                        trading_records.append(result["stats"])
 
-                    # Ghi BCTT (Financial Report Source) từ stats tab BCTT
-                    if stats and stats.get("bctt_latest_period") and not stats.get("error"):
-                        status_rep = db_service.save_financial_report_source(stats, stock_id, data_source_id)
-                        if status_rep != "SKIPPED":
-                            db_service.write_crawl_log_detail(log_id, stock_id, symbol, "FINANCIAL_REPORT_SOURCE", "SUCCESS", "Thành công BCTT")
+                    records_fetched += 1
+                    records_inserted += result.get("inserted", 0)
+                    records_updated += result.get("updated", 0)
+                    records_failed += result.get("failed", 0)
+                    logging.info(f"  [{symbol}] Retried SUCCESS on attempt {attempt}")
+                elif result["status"] == "SKIPPED":
+                    skipped_list.append(symbol)
+                    logging.info(f"  [{symbol}] Retried SKIPPED on attempt {attempt}")
 
-                # Delay giãn cách request tránh bị chặn IP
+            except Exception as exc:
+                execution_time = time.time() - start_time
+                err_msg = str(exc)
+                if isinstance(exc, TimeoutError) or "Timeout >" in err_msg:
+                    logging.warning(f"  [{symbol}] TIMEOUT after {execution_time:.1f}s")
+                    new_reason = "timeout"
+                else:
+                    logging.warning(f"  [{symbol}] ERROR after {execution_time:.1f}s: {err_msg}")
+                    new_reason = err_msg
+
+                if attempt < 3:
+                    logging.warning(f"  [{symbol}] Attempt {attempt} failed ({new_reason}), will retry again")
+                    retry_symbols.append({
+                        "symbol": symbol,
+                        "reason": new_reason,
+                        "attempt": attempt + 1,
+                        "item": item
+                    })
+                else:
+                    failed_retry.append(symbol)
+                    logging.error(f"  [{symbol}] FAILED AFTER 3 RETRIES")
+                    records_failed += 1
+                    if settings.save_to_mongodb and db_service.is_connected() and log_id:
+                        db_service.write_crawl_log_detail(log_id, stock_id, symbol, "CRAWL_JOB", "FAILED", f"FAILED AFTER 3 RETRIES: {new_reason}")
+
+            if settings.request_delay_seconds > 0 and len(retry_symbols) > 0:
                 time.sleep(settings.request_delay_seconds)
-
-            except Exception as e:
-                logging.exception(f"Lỗi crawl symbol {symbol}: {e}")
-                records_failed += 1
-                if settings.save_to_mongodb and db_service.is_connected() and log_id:
-                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "CRAWL_JOB", "FAILED", str(e))
 
     # 6. Ghi logs tổng hợp cuối cùng & chất lượng
     ended_at = datetime.utcnow()
     status_summary = "SUCCESS" if records_failed == 0 else "PARTIAL_SUCCESS"
-    if records_fetched == records_failed:
+    if records_fetched == 0 and records_failed > 0:
         status_summary = "FAILED"
 
     if settings.save_to_mongodb and db_service.is_connected() and log_id:
@@ -340,9 +528,25 @@ def run() -> None:
         except Exception as e:
             logging.error(f"[GSheet] Lưu dữ liệu lên Google Sheets thất bại: {e}")
 
+    logging.info("\n=================================================")
+    logging.info("CRAWL SUMMARY")
+    logging.info("=============\n")
+    logging.info(f"Total symbols: {symbols_count}")
+    logging.info(f"Success: {len(success_first)}")
+    logging.info(f"Retried Success: {len(success_retry)}")
+    logging.info(f"Failed After Retry: {len(failed_retry)}")
+    logging.info("=====================\n")
+    if failed_retry:
+        logging.info("Failed symbols:\n")
+        for fs in failed_retry:
+            logging.info(f"* {fs}")
+    else:
+        logging.info("No failed symbols.")
+    logging.info("\n" + "═" * 70)
+
     logging.info(
         f"\n=== Kết quả crawl: ===\n"
-        f"- Tổng số mã: {records_fetched}\n"
+        f"- Tổng số mã: {symbols_count}\n"
         f"- Thêm mới (Insert DB): {records_inserted}\n"
         f"- Cập nhật (Update DB): {records_updated}\n"
         f"- Thất bại (Failed): {records_failed}\n"
