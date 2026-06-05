@@ -68,27 +68,37 @@ def crawl_company(symbol: str, slug: str, browser: VietstockBrowser, profile_url
         market["bid_volume"] = find_value_in_text_near_label(text, "Dư mua")
         market["ask_volume"] = find_value_in_text_near_label(text, "Dư bán")
 
-        # Fallback to overview trading table on the profile page if volume is missing
-        if market["volume"] is None:
-            try:
-                table = soup.find("table", class_="overview-trading__table")
-                if table:
-                    tbody = table.find("tbody")
-                    if tbody:
-                        first_tr = tbody.find("tr")
-                        if first_tr:
-                            cells = [c.get_text(" ", strip=True) for c in first_tr.find_all("td")]
-                            if len(cells) >= 4:
+        # Parse from overview trading table on the profile page (for volume fallback, reference, price change)
+        try:
+            table = soup.find("table", class_="overview-trading__table")
+            if table:
+                tbody = table.find("tbody")
+                if tbody:
+                    first_tr = tbody.find("tr")
+                    if first_tr:
+                        cells = [c.get_text(" ", strip=True) for c in first_tr.find_all("td")]
+                        if len(cells) >= 4:
+                            if market["volume"] is None:
                                 market["volume"] = normalize_number(cells[3])
-                                if market["reference"] is None and market["price"] is not None:
-                                    change_str = cells[2]
-                                    m = re.match(r"\s*([-+−]?\s*\d[\d,.]*)", change_str.replace("−", "-"))
-                                    if m:
-                                        change_val = normalize_number(m.group(1).replace(" ", ""))
-                                        if change_val is not None:
-                                            market["reference"] = market["price"] - change_val
-            except Exception as e:
-                logging.warning(f"Failed to parse volume/reference from overview table for {symbol}: {e}")
+                            
+                            change_str = cells[2]
+                            c_val, c_pct = None, None
+                            if change_str.strip() == "0":
+                                c_val = 0.0
+                                c_pct = 0.0
+                            else:
+                                m = re.match(r"\s*([-+−]?\s*[\d,.]+)\s*\(\s*([-+−]?\s*[\d,.]+)%\s*\)", change_str.replace("−", "-"))
+                                if m:
+                                    c_val = normalize_number(m.group(1).replace(" ", ""))
+                                    c_pct = normalize_number(m.group(2).replace(" ", ""))
+                            
+                            market["price_change"] = c_val
+                            market["price_change_percent"] = c_pct
+                            
+                            if market["reference"] is None and market["price"] is not None and c_val is not None:
+                                market["reference"] = market["price"] - c_val
+        except Exception as e:
+            logging.warning(f"Failed to parse overview table fields for {symbol}: {e}")
 
         market["foreign_buy"] = extract_foreign_volume(html, lines, text, ["NN mua", "Nước ngoài mua"])
         market["foreign_sell"] = extract_foreign_volume(html, lines, text, ["NN bán", "Nước ngoài bán"])
@@ -100,6 +110,7 @@ def crawl_company(symbol: str, slug: str, browser: VietstockBrowser, profile_url
         market["bvps"] = find_value_in_text_near_label(text, "BVPS")
         market["pb"] = find_value_in_text_near_label(text, "P/B")
         market["beta"] = find_value_in_text_near_label(text, "Beta")
+        market["ros"] = get_latest_metric_value(html, lines, ["ROS"], max_abs=1000)
         market["roea"] = get_latest_metric_value(html, lines, ["ROEA"], max_abs=1000)
         market["roaa"] = get_latest_metric_value(html, lines, ["ROAA"], max_abs=1000)
         # Vietstock thường không có dòng ROE riêng ở box này; dùng ROEA làm ROE fallback.
@@ -170,7 +181,7 @@ def crawl_company(symbol: str, slug: str, browser: VietstockBrowser, profile_url
         financial["eps_4q"] = market.get("eps") or get_latest_metric_value(html, lines, ["EPS 4 quý"], min_abs=1)
         financial["bvps"] = market.get("bvps") or get_latest_metric_value(html, lines, ["BVPS cơ bản", "BVPS"], min_abs=1)
         financial["pe_basic"] = market.get("pe") or get_latest_metric_value(html, lines, ["P/E cơ bản"], max_abs=1000)
-        financial["ros"] = get_latest_metric_value(html, lines, ["ROS"], max_abs=1000)
+        financial["ros"] = market.get("ros") or get_latest_metric_value(html, lines, ["ROS"], max_abs=1000)
         financial["roea"] = get_latest_metric_value(html, lines, ["ROEA"], max_abs=1000) or market.get("roea")
         financial["roaa"] = get_latest_metric_value(html, lines, ["ROAA"], max_abs=1000) or market.get("roaa")
         financial["roe"] = get_latest_metric_value(html, lines, ["ROE"], max_abs=1000) or financial["roea"] or market.get("roe")
