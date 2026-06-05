@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, Tuple
 
 from bs4 import BeautifulSoup
@@ -16,6 +17,7 @@ from vietstock_crawler.parsers.common import (
 from vietstock_crawler.parsers.financial_parser import apply_bctt_fallback_to_financial
 from vietstock_crawler.parsers.market_parser import extract_current_price, extract_foreign_volume, validate_market_price
 from vietstock_crawler.parsers.trading_stats_parser import crawl_trading_stats
+from vietstock_crawler.utils.number_utils import normalize_number
 from vietstock_crawler.utils.url_utils import is_wrong_profile_html, make_company_url
 
 def crawl_company(symbol: str, slug: str, browser: VietstockBrowser, profile_url: str = "", crawl_financial: bool = True):
@@ -65,6 +67,29 @@ def crawl_company(symbol: str, slug: str, browser: VietstockBrowser, profile_url
         market["market_cap"] = find_value_in_text_near_label(text, "Vốn hóa")
         market["bid_volume"] = find_value_in_text_near_label(text, "Dư mua")
         market["ask_volume"] = find_value_in_text_near_label(text, "Dư bán")
+
+        # Fallback to overview trading table on the profile page if volume is missing
+        if market["volume"] is None:
+            try:
+                table = soup.find("table", class_="overview-trading__table")
+                if table:
+                    tbody = table.find("tbody")
+                    if tbody:
+                        first_tr = tbody.find("tr")
+                        if first_tr:
+                            cells = [c.get_text(" ", strip=True) for c in first_tr.find_all("td")]
+                            if len(cells) >= 4:
+                                market["volume"] = normalize_number(cells[3])
+                                if market["reference"] is None and market["price"] is not None:
+                                    change_str = cells[2]
+                                    m = re.match(r"\s*([-+−]?\s*\d[\d,.]*)", change_str.replace("−", "-"))
+                                    if m:
+                                        change_val = normalize_number(m.group(1).replace(" ", ""))
+                                        if change_val is not None:
+                                            market["reference"] = market["price"] - change_val
+            except Exception as e:
+                logging.warning(f"Failed to parse volume/reference from overview table for {symbol}: {e}")
+
         market["foreign_buy"] = extract_foreign_volume(html, lines, text, ["NN mua", "Nước ngoài mua"])
         market["foreign_sell"] = extract_foreign_volume(html, lines, text, ["NN bán", "Nước ngoài bán"])
         if market["foreign_buy"] is not None and market["foreign_sell"] is not None:
