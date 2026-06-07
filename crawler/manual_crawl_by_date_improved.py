@@ -29,6 +29,7 @@ ENV cho provider fallback, nếu có license/API:
 
 from __future__ import annotations
 
+import concurrent.futures
 import argparse
 import io
 import logging
@@ -53,6 +54,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from vietstock_crawler.config.settings import get_settings
 from vietstock_crawler.core.browser import VietstockBrowser
 from vietstock_crawler.services.vietstock_service import crawl_company
 
@@ -852,6 +854,158 @@ def upsert_fact_market_price(db, doc: dict[str, Any]) -> tuple[int, int]:
 
 
 # ═══════════════════════════════════════════════════════
+# Standalone Symbol Crawl Logic & Timeout Wrapper
+# ═══════════════════════════════════════════════════════
+def crawl_single_symbol(
+    db,
+    stock: dict[str, Any],
+    target_date: date,
+    provider_names: list[str],
+    data_source_id: ObjectId,
+    time_id: int,
+    hose_market_id: ObjectId | None,
+    is_dry_run: bool,
+    crawl_log_id: ObjectId,
+    timeout: float | None = None
+) -> dict[str, Any]:
+    """
+    Crawls a single symbol. Opens its own browser session to be thread-safe,
+    and performs MongoDB saving.
+    """
+    symbol = stock.get("symbol", "???").upper()
+    stock_id = stock["_id"]
+    market_id = stock.get("market_id") or hose_market_id
+    industry_id = stock.get("industry_id")
+    slug = stock.get("slug") or symbol.lower()
+
+    with VietstockBrowser(timeout=timeout) as browser:
+        providers = build_providers(provider_names, browser)
+        stock_ds = get_or_create_stock_data_source(db, stock, dry_run=is_dry_run)
+        current_ds_id = stock_ds.get("_id") or data_source_id
+        context = {
+            "slug": slug,
+            "market_price_data_url": stock_ds.get("market_price_data_url"),
+            "trade_stats_url": stock_ds.get("trade_stats_url"),
+            "financial_data_url": stock_ds.get("financial_data_url"),
+        }
+
+        raw_data, source_used, provider_errors = fetch_market_price(symbol, target_date, context, providers)
+
+        if raw_data is None:
+            if provider_errors:
+                raise RuntimeError(f"Provider errors: {' | '.join(provider_errors)}")
+            msg = f"Không có dữ liệu cho ngày {target_date}."
+            logger.warning(f"  [{symbol}] {msg}")
+            if not is_dry_run:
+                write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "SKIPPED", msg)
+            return {
+                "status": "SKIPPED",
+                "message": msg
+            }
+
+        missing_required = get_missing_fields(raw_data, REQUIRED_FIELDS)
+        missing_all = get_missing_fields(raw_data, ALL_QUALITY_FIELDS)
+        completeness = calculate_data_completeness(raw_data)
+
+        if missing_required:
+            if provider_errors:
+                raise RuntimeError(f"Thiếu field bắt buộc {missing_required} do provider lỗi: {' | '.join(provider_errors)}")
+            msg = f"Thiếu field bắt buộc: {missing_required}; completeness={completeness}%; source={source_used}"
+            logger.warning(f"  [{symbol}] ⚠️ SKIPPED - {msg}")
+            if not is_dry_run:
+                write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "SKIPPED", msg)
+            return {
+                "status": "SKIPPED",
+                "message": msg
+            }
+
+        # Apply fallback for market_id if it's missing/null
+        if not market_id and hose_market_id:
+            market_id = hose_market_id
+
+        fact_doc = map_to_fact_market_price(
+            raw_data=raw_data,
+            stock_id=stock_id,
+            market_id=market_id,
+            industry_id=industry_id,
+            data_source_id=current_ds_id,
+            time_id=time_id,
+            source_used=source_used,
+        )
+
+        if is_dry_run:
+            logger.info(
+                f"  [{symbol}] ✅ [DRY RUN] completeness={completeness}%, "
+                f"missing={missing_all}, source={source_used}, data={raw_data}"
+            )
+            return {
+                "status": "SUCCESS",
+                "action": "INSERT",
+                "inserted": 1,
+                "updated": 0,
+                "raw_data": raw_data,
+                "source_used": source_used,
+                "completeness": completeness,
+                "missing_all": missing_all
+            }
+
+        inserted, updated = upsert_fact_market_price(db, fact_doc)
+        action = "INSERT" if inserted else ("UPDATE" if updated else "UNCHANGED")
+        logger.info(f"  [{symbol}] ✅ {action} | completeness={completeness}% | missing={missing_all} | source={source_used}")
+
+        success_msg = f"{action}: close={raw_data.get('close_price')}, volume={raw_data.get('volume')}, completeness={completeness}%, missing={missing_all}, source={source_used}"
+        write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "SUCCESS", success_msg)
+
+        return {
+            "status": "SUCCESS",
+            "action": action,
+            "inserted": inserted,
+            "updated": updated,
+            "raw_data": raw_data,
+            "source_used": source_used,
+            "completeness": completeness,
+            "missing_all": missing_all
+        }
+
+
+def crawl_symbol_with_timeout(
+    db,
+    stock: dict[str, Any],
+    target_date: date,
+    provider_names: list[str],
+    data_source_id: ObjectId,
+    time_id: int,
+    hose_market_id: ObjectId | None,
+    is_dry_run: bool,
+    crawl_log_id: ObjectId,
+    timeout: float = 25.0
+) -> dict[str, Any]:
+    """
+    Runs the crawl function inside a ThreadPoolExecutor with a hard timeout.
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(
+        crawl_single_symbol,
+        db=db,
+        stock=stock,
+        target_date=target_date,
+        provider_names=provider_names,
+        data_source_id=data_source_id,
+        time_id=time_id,
+        hose_market_id=hose_market_id,
+        is_dry_run=is_dry_run,
+        crawl_log_id=crawl_log_id,
+        timeout=timeout
+    )
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        raise TimeoutError(f"Timeout > {timeout}s")
+    finally:
+        executor.shutdown(wait=False)
+
+
+# ═══════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════
 def main():
@@ -896,27 +1050,88 @@ def main():
         hose_market_id = hose_market["_id"] if hose_market else None
 
         total = len(stocks)
-        cnt_fetched = cnt_inserted = cnt_updated = cnt_failed = cnt_skipped = 0
+        
+        # Tracking states
+        success_first = []
+        success_retry = []
+        failed_retry = []
+        skipped_list = []
+        
+        retry_symbols = []
+        
+        cnt_inserted = cnt_updated = 0
 
         logger.info("\n" + "═" * 70)
         logger.info(f"🚀 Bắt đầu crawl {total} mã HOSE ngày {target_date}")
         logger.info(f"🔁 Providers: {args.providers}")
         logger.info("═" * 70 + "\n")
 
+        settings = get_settings()
         provider_names = [p.strip() for p in args.providers.split(",") if p.strip()]
 
-        with VietstockBrowser() as browser:
-            providers = build_providers(provider_names, browser)
+        # Main Queue Execution
+        for idx, stock in enumerate(stocks, start=1):
+            symbol = stock.get("symbol", "???").upper()
+            logger.info(f"[{idx}/{total}] ▶ {symbol} ...")
 
-            for idx, stock in enumerate(stocks, start=1):
-                symbol = stock.get("symbol", "???").upper()
+            start_time = time.time()
+            try:
+                result = crawl_symbol_with_timeout(
+                    db=db,
+                    stock=stock,
+                    target_date=target_date,
+                    provider_names=provider_names,
+                    data_source_id=data_source_id,
+                    time_id=time_id,
+                    hose_market_id=hose_market_id,
+                    is_dry_run=is_dry_run,
+                    crawl_log_id=crawl_log_id,
+                    timeout=settings.symbol_crawl_timeout
+                )
+                if result["status"] == "SUCCESS":
+                    success_first.append(symbol)
+                    cnt_inserted += result.get("inserted", 0)
+                    cnt_updated += result.get("updated", 0)
+                elif result["status"] == "SKIPPED":
+                    skipped_list.append(symbol)
+
+            except Exception as exc:
+                execution_time = time.time() - start_time
+                err_msg = str(exc)
+                if isinstance(exc, TimeoutError) or "Timeout >" in err_msg:
+                    logger.warning(f"  [{symbol}] TIMEOUT after {execution_time:.1f}s")
+                    reason = "timeout"
+                else:
+                    logger.warning(f"  [{symbol}] ERROR after {execution_time:.1f}s: {err_msg}")
+                    reason = err_msg
+
+                retry_symbols.append({
+                    "symbol": symbol,
+                    "reason": reason,
+                    "attempt": 2,
+                    "stock": stock
+                })
+
+            if args.delay > 0 and idx < total:
+                time.sleep(args.delay)
+
+        # Retry Phase
+        if retry_symbols:
+            logger.info("\n" + "═" * 70)
+            logger.info("=== RETRY PHASE START ===")
+            logger.info("═" * 70 + "\n")
+
+            while retry_symbols:
+                item = retry_symbols.pop(0)
+                symbol = item["symbol"]
+                attempt = item["attempt"]
+                stock = item["stock"]
                 stock_id = stock["_id"]
-                market_id = stock.get("market_id") or hose_market_id
-                industry_id = stock.get("industry_id")
-                slug = stock.get("slug") or symbol.lower()
+                reason = item["reason"]
 
-                logger.info(f"[{idx}/{total}] ▶ {symbol} ...")
+                logger.info(f"[{symbol}] Retry {attempt}/3")
 
+                start_time = time.time()
                 try:
                     stock_ds = get_or_create_stock_data_source(db, stock, dry_run=is_dry_run)
                     current_ds_id = stock_ds.get("_id") or data_source_id
@@ -961,38 +1176,50 @@ def main():
                         industry_id=industry_id,
                         data_source_id=current_ds_id,
                         time_id=time_id,
-                        source_used=source_used,
+                        hose_market_id=hose_market_id,
+                        is_dry_run=is_dry_run,
+                        crawl_log_id=crawl_log_id,
+                        timeout=settings.symbol_crawl_timeout
                     )
-
-                    if is_dry_run:
-                        logger.info(
-                            f"  [{symbol}] ✅ [DRY RUN] completeness={completeness}%, "
-                            f"missing={missing_all}, source={source_used}, data={raw_data}"
-                        )
-                        cnt_inserted += 1
-                        continue
-
-                    inserted, updated = upsert_fact_market_price(db, fact_doc)
-                    cnt_inserted += inserted
-                    cnt_updated += updated
-
-                    action = "INSERT" if inserted else ("UPDATE" if updated else "UNCHANGED")
-                    logger.info(f"  [{symbol}] ✅ {action} | completeness={completeness}% | missing={missing_all} | source={source_used}")
-
-                    write_crawl_log_detail(
-                        db, crawl_log_id, stock_id, symbol, "SUCCESS",
-                        f"{action}: close={raw_data.get('close_price')}, volume={raw_data.get('volume')}, completeness={completeness}%, missing={missing_all}, source={source_used}",
-                    )
+                    if result["status"] == "SUCCESS":
+                        success_retry.append(symbol)
+                        cnt_inserted += result.get("inserted", 0)
+                        cnt_updated += result.get("updated", 0)
+                        logger.info(f"  [{symbol}] Retried SUCCESS on attempt {attempt}")
+                    elif result["status"] == "SKIPPED":
+                        skipped_list.append(symbol)
+                        logger.info(f"  [{symbol}] Retried SKIPPED on attempt {attempt}")
 
                 except Exception as exc:
-                    cnt_failed += 1
+                    execution_time = time.time() - start_time
                     err_msg = str(exc)
-                    logger.error(f"  [{symbol}] ❌ FAILED: {err_msg}")
-                    if not is_dry_run:
-                        write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "FAILED", err_msg)
+                    if isinstance(exc, TimeoutError) or "Timeout >" in err_msg:
+                        logger.warning(f"  [{symbol}] TIMEOUT after {execution_time:.1f}s")
+                        new_reason = "timeout"
+                    else:
+                        logger.warning(f"  [{symbol}] ERROR after {execution_time:.1f}s: {err_msg}")
+                        new_reason = err_msg
 
-                if args.delay > 0 and idx < total:
+                    if attempt < 3:
+                        logger.warning(f"  [{symbol}] Attempt {attempt} failed ({new_reason}), will retry again")
+                        retry_symbols.append({
+                            "symbol": symbol,
+                            "reason": new_reason,
+                            "attempt": attempt + 1,
+                            "stock": stock
+                        })
+                    else:
+                        failed_retry.append(symbol)
+                        logger.error(f"  [{symbol}] FAILED AFTER 3 RETRIES")
+                        if not is_dry_run:
+                            write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "FAILED", f"FAILED AFTER 3 RETRIES: {new_reason}")
+
+                if args.delay > 0 and len(retry_symbols) > 0:
                     time.sleep(args.delay)
+
+        cnt_fetched = len(success_first) + len(success_retry)
+        cnt_failed = len(failed_retry)
+        cnt_skipped = len(skipped_list)
 
         if cnt_failed == 0 and cnt_fetched > 0:
             final_status = "SUCCESS"
@@ -1005,17 +1232,21 @@ def main():
         else:
             final_status = "SUCCESS"
 
+        logger.info("\n=================================================")
+        logger.info("CRAWL SUMMARY")
+        logger.info("=============\n")
+        logger.info(f"Total symbols: {total}")
+        logger.info(f"Success: {len(success_first)}")
+        logger.info(f"Retried Success: {len(success_retry)}")
+        logger.info(f"Failed After Retry: {len(failed_retry)}")
+        logger.info("=====================\n")
+        if failed_retry:
+            logger.info("Failed symbols:\n")
+            for fs in failed_retry:
+                logger.info(f"* {fs}")
+        else:
+            logger.info("No failed symbols.")
         logger.info("\n" + "═" * 70)
-        logger.info(f"📋 KẾT QUẢ CRAWL NGÀY {target_date}")
-        logger.info("═" * 70)
-        logger.info(f"  Tổng số mã              : {total}")
-        logger.info(f"  Có đủ field bắt buộc    : {cnt_fetched}")
-        logger.info(f"  Bỏ qua                  : {cnt_skipped}")
-        logger.info(f"  Lỗi                     : {cnt_failed}")
-        logger.info(f"  Insert mới              : {cnt_inserted}")
-        logger.info(f"  Cập nhật                : {cnt_updated}")
-        logger.info(f"  Trạng thái              : {final_status}")
-        logger.info("═" * 70 + "\n")
 
         if not is_dry_run:
             finalize_crawl_log(db, crawl_log_id, cnt_fetched, cnt_inserted, cnt_updated, cnt_failed, cnt_skipped, final_status)

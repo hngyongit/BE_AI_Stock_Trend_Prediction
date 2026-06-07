@@ -224,6 +224,11 @@ class MongoDBService:
 
         col = self.db["factMarketPrices"]
         
+        if not market_id:
+            hose_market = self.db["dimMarkets"].find_one({"code": "HOSE"})
+            if hose_market:
+                market_id = hose_market["_id"]
+
         # 1. Parse time_id
         # Snapshot_at có dạng VN time string: "2026-06-03 17:00:00" -> ta chuyển thành YYYYMMDD
         snapshot_str = record.get("snapshot_at", "")
