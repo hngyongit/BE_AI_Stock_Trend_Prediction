@@ -6,11 +6,13 @@ Script crawl thủ công dữ liệu chứng khoán theo ngày bất kỳ, cải
 - Không ép insert nếu thiếu field bắt buộc.
 - Ghi data_completeness, missing_fields, source_used để kiểm soát chất lượng dữ liệu.
 - Với dữ liệu quá khứ, vẫn cố fill foreign/bid/ask nếu nguồn có hỗ trợ.
+- Tự động click "Xem thêm" để tải thêm dữ liệu lịch sử.
 
 Cách dùng:
     python manual_crawl_by_date_improved.py --date 2026-05-22
     python manual_crawl_by_date_improved.py --date 2026-05-22 --delay 0.3 --dry-run
     python manual_crawl_by_date_improved.py --date 2026-05-22 --providers vietstock,fiintrade,eodhd
+    python manual_crawl_by_date_improved.py --date 2026-05-22 --max-load-more 10 --load-more-timeout 5 --debug-provider
 
 ENV cần có:
     MONGODB_URI=...
@@ -415,6 +417,11 @@ class VietstockBrowserProvider:
         profile_url = context.get("market_price_data_url") or f"https://finance.vietstock.vn/{symbol.lower()}-profile.htm"
         stats_url = context.get("trade_stats_url") or f"https://finance.vietstock.vn/{symbol.lower()}/thong-ke-giao-dich.htm"
 
+        # Get load-more config from context
+        max_load_more = context.get("max_load_more", 10)
+        load_more_timeout = context.get("load_more_timeout", 5.0)
+        debug_provider = context.get("debug_provider", False)
+
         enable_financial = os.getenv("ENABLE_FINANCIAL_DATA", "false").lower() == "true"
         market, financial = crawl_company(
             symbol=symbol,
@@ -426,9 +433,61 @@ class VietstockBrowserProvider:
         if market.get("error") or not market.get("is_valid_url"):
             raise RuntimeError(market.get("error") or "Không tải được trang profile")
 
-        html = self.browser.get_html(stats_url)
-        hist_data = extract_historical_price_from_trading_stats(html, target_date)
-        if not hist_data:
+        # Navigate to trading stats page and handle load-more
+        self.browser.get_html(stats_url)
+        click_count = 0
+        found_target = False
+
+        while True:
+            html = self.browser.page.content()
+            min_date, max_date = get_table_dates(html)
+            row_count = get_table_row_count(html)
+
+            hist_data = extract_historical_price_from_trading_stats(html, target_date)
+            found_target = hist_data is not None
+
+            min_date_str = min_date.strftime("%Y-%m-%d") if min_date else "None"
+            max_date_str = max_date.strftime("%Y-%m-%d") if max_date else "None"
+
+            # Log rõ các thông số yêu cầu
+            if debug_provider:
+                logger.info(
+                    f"  [{symbol}] [Load-more Vietstock] "
+                    f"Số dòng table hiện có: {row_count} | "
+                    f"Min/Max date trong table: {min_date_str} -> {max_date_str} | "
+                    f"Số lần đã click “Xem thêm”: {click_count} | "
+                    f"Có tìm thấy target date ({target_date}) không: {'CÓ' if found_target else 'KHÔNG'}"
+                )
+
+            # Điều kiện dừng 1: tìm thấy target date
+            if found_target:
+                if debug_provider:
+                    logger.info(f"  [{symbol}] ✅ Tìm thấy target date {target_date} ở lần click thứ {click_count}. Dừng ngay, không load thêm.")
+                break
+
+            # Điều kiện dừng 2: ngày nhỏ nhất trong table đã cũ hơn target date
+            if min_date and min_date < target_date:
+                if debug_provider:
+                    logger.info(f"  [{symbol}] ⏹️ Dừng: ngày nhỏ nhất trong table ({min_date_str}) đã cũ hơn target date ({target_date})")
+                break
+
+            # Điều kiện dừng 3: đạt max_clicks (max_load_more)
+            if click_count >= max_load_more:
+                if debug_provider:
+                    logger.info(f"  [{symbol}] ⏹️ Dừng: đạt max_clicks ({max_load_more})")
+                break
+
+            # Điều kiện dừng 4: hết nút “Xem thêm” (click_load_more trả về False)
+            if not self.browser.click_load_more(timeout=load_more_timeout):
+                if debug_provider:
+                    logger.info(f"  [{symbol}] ⏹️ Dừng: hết nút “Xem thêm” hoặc không tải thêm được dữ liệu")
+                break
+
+            click_count += 1
+
+        if not found_target:
+            if debug_provider:
+                logger.info(f"  [{symbol}] ❌ Không tìm thấy dữ liệu cho ngày {target_date} sau {click_count} lần click")
             return None
 
         result = {
@@ -621,9 +680,95 @@ def fetch_market_price(symbol: str, target_date: date, context: dict[str, Any], 
 # ═══════════════════════════════════════════════════════
 # Vietstock HTML parser
 # ═══════════════════════════════════════════════════════
-def extract_historical_price_from_trading_stats(html: str, target_date: date) -> dict[str, Any] | None:
+def parse_table_row(cells: list[str]) -> dict[str, Any] | None:
+    """Parse a single table row and extract price data."""
     from vietstock_crawler.utils.number_utils import normalize_number
 
+    if len(cells) < 8:
+        return None
+
+    def safe_num(idx: int):
+        if idx >= len(cells):
+            return None
+        return normalize_number(cells[idx])
+
+    volume = safe_num(11)
+    if volume is not None:
+        volume = int(volume * 1_000_000)  # Vietstock hiển thị triệu CP
+
+    market_cap = safe_num(17)
+    if market_cap is not None:
+        market_cap = market_cap * 1_000_000_000  # tỷ đồng
+
+    foreign_buy = safe_num(18)
+    foreign_sell = safe_num(19)
+    foreign_net = None
+    if foreign_buy is not None and foreign_sell is not None:
+        foreign_net = foreign_buy - foreign_sell
+
+    return {
+        "reference": safe_num(3),
+        "open": safe_num(4),
+        "close": safe_num(5),
+        "high": safe_num(6),
+        "low": safe_num(7),
+        "price_change": safe_num(9),
+        "price_change_percent": safe_num(10),
+        "volume": volume,
+        "market_cap": market_cap,
+        "bid_volume": None,
+        "ask_volume": None,
+        "foreign_buy": foreign_buy,
+        "foreign_sell": foreign_sell,
+        "foreign_net": foreign_net,
+    }
+
+
+def extract_date_from_cell(cell_text: str) -> date | None:
+    """Extract date from a cell text, trying multiple formats."""
+    for fmt in ["%d/%m/%Y", "%d/%m/%y"]:
+        try:
+            return datetime.strptime(cell_text.strip(), fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def get_table_dates(html: str) -> tuple[date | None, date | None]:
+    """Extract min and max dates from historical price table in HTML."""
+    soup = BeautifulSoup(html, "html.parser")
+    dates_found = []
+
+    for table in soup.find_all("table"):
+        for row in table.find_all("tr"):
+            cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+            if len(cells) < 2:
+                continue
+            for cell in cells[:3]:
+                parsed = extract_date_from_cell(cell)
+                if parsed:
+                    dates_found.append(parsed)
+                    break
+
+    if dates_found:
+        return min(dates_found), max(dates_found)
+    return None, None
+
+
+def get_table_row_count(html: str) -> int:
+    """Count data rows in historical price table."""
+    soup = BeautifulSoup(html, "html.parser")
+    row_count = 0
+    for table in soup.find_all("table"):
+        for row in table.find_all("tr"):
+            cells = row.find_all(["td", "th"])
+            if len(cells) >= 8:
+                row_count += 1
+    return row_count
+
+
+def extract_historical_price_from_trading_stats(html: str, target_date: date) -> dict[str, Any] | None:
+    """Extract historical price data for target date from HTML."""
     soup = BeautifulSoup(html, "html.parser")
     date_options = {
         target_date.strftime("%d/%m/%Y"),
@@ -641,45 +786,7 @@ def extract_historical_price_from_trading_stats(html: str, target_date: date) ->
             if not any(c in date_options for c in date_cell_candidates):
                 continue
 
-            # Layout Vietstock hiện tại thường có: date ở index 1,
-            # reference index 3, open 4, close 5, high 6, low 7,
-            # change 9, change% 10, volume index 11, market_cap index 17.
-            def safe_num(idx: int):
-                if idx >= len(cells):
-                    return None
-                return normalize_number(cells[idx])
-
-            volume = safe_num(11)
-            if volume is not None:
-                volume = int(volume * 1_000_000)  # Vietstock hiển thị triệu CP
-
-            market_cap = safe_num(17)
-            if market_cap is not None:
-                market_cap = market_cap * 1_000_000_000  # tỷ đồng
-
-            # Các cột này phụ thuộc layout Vietstock; nếu không có thì để None.
-            foreign_buy = safe_num(18)
-            foreign_sell = safe_num(19)
-            foreign_net = None
-            if foreign_buy is not None and foreign_sell is not None:
-                foreign_net = foreign_buy - foreign_sell
-
-            return {
-                "reference": safe_num(3),
-                "open": safe_num(4),
-                "close": safe_num(5),
-                "high": safe_num(6),
-                "low": safe_num(7),
-                "price_change": safe_num(9),
-                "price_change_percent": safe_num(10),
-                "volume": volume,
-                "market_cap": market_cap,
-                "bid_volume": None,
-                "ask_volume": None,
-                "foreign_buy": foreign_buy,
-                "foreign_sell": foreign_sell,
-                "foreign_net": foreign_net,
-            }
+            return parse_table_row(cells)
     return None
 
 
@@ -759,6 +866,9 @@ def main():
         default="vietstock,fiintrade,vietstock_datafeed,eodhd",
         help="Danh sách provider theo thứ tự ưu tiên, phân tách bằng dấu phẩy",
     )
+    parser.add_argument("--max-load-more", type=int, default=10, help="Số lần tối đa click 'Xem thêm' (mặc định: 10)")
+    parser.add_argument("--load-more-timeout", type=float, default=5.0, help="Timeout giây chờ click 'Xem thêm' (mặc định: 5)")
+    parser.add_argument("--debug-provider", action="store_true", help="Bật log debug cho provider")
     args = parser.parse_args()
 
     target_date = parse_date(args.date)
@@ -815,6 +925,9 @@ def main():
                         "market_price_data_url": stock_ds.get("market_price_data_url"),
                         "trade_stats_url": stock_ds.get("trade_stats_url"),
                         "financial_data_url": stock_ds.get("financial_data_url"),
+                        "max_load_more": args.max_load_more,
+                        "load_more_timeout": args.load_more_timeout,
+                        "debug_provider": args.debug_provider,
                     }
 
                     raw_data, source_used, provider_errors = fetch_market_price(symbol, target_date, context, providers)

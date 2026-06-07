@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import date, datetime
 from typing import Dict
 
 import requests
+from bs4 import BeautifulSoup
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -20,6 +22,9 @@ from vietstock_crawler.config.settings import (
     PLAYWRIGHT_WAIT_UNTIL,
 )
 from vietstock_crawler.utils.url_utils import is_same_navigation_target
+from vietstock_crawler.utils.number_utils import normalize_number
+from bs4 import BeautifulSoup
+import datetime
 
 
 def fetch_html_requests(url: str) -> str:
@@ -272,3 +277,145 @@ class VietstockBrowser:
             last_error = f"{last_error}; requests fallback failed: {e}"
 
         raise RuntimeError(f"Không mở được URL sau {MAX_PAGE_RETRIES} lần: {url}. Last error: {last_error}")
+
+    def click_load_more(self, timeout: float = 5.0) -> bool:
+        """Click 'Xem thêm' button on Vietstock trading stats page and wait for table to append data.
+        Returns True if clicked and new rows were appended successfully within timeout."""
+        try:
+            # Get current row count before click
+            html_before = self.page.content()
+            prev_row_count = self.get_table_row_count(html_before)
+
+            # First, try to scroll to bottom to reveal load-more button if it exists
+            self.page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            self.page.wait_for_timeout(500)
+            
+            # Try multiple selectors for "Xem thêm" button
+            selectors = [
+                "button:has-text('Xem thêm')",
+                "a:has-text('Xem thêm')",
+                "button:has-text('xem thêm')",
+                "button:has-text('Xem Thêm')",
+                "a:has-text('Xem Thêm')",
+                ".load-more",
+                ".btn-load-more",
+                ".btn_xemthem",
+                "[class*='load-more']",
+                "[class*='xem-them']",
+                "[class*='xemthem']",
+                "button[class*='load']",
+                "a[class*='load']",
+                # More generic: any button with "thêm" text
+                "button:has-text('thêm')",
+                "a:has-text('thêm')",
+                # Vietstock specific selectors
+                ".btn-xem-them",
+                ".btn_xem-them",
+                "#btnLoadMore",
+                "#loadMoreBtn",
+                # Icon-based selectors (chevron, arrow icons often used for load more)
+                "button:has-text('▶')",
+                "button:has-text('▼')",
+                "button:has-text('>')",
+                "button:has-text('+')",
+                "[aria-label*='Xem thêm']",
+                "[title*='Xem thêm']",
+            ]
+            
+            clicked = False
+            for selector in selectors:
+                try:
+                    locator = self.page.locator(selector)
+                    if locator.count() > 0:
+                        btn = locator.first
+                        if btn.is_visible(timeout=500):  # Short timeout for visibility check
+                            btn.click(timeout=1000)
+                            logging.info("Clicked load-more button with selector: %s", selector)
+                            clicked = True
+                            break
+                except Exception:
+                    continue
+            
+            # Try finding by evaluating page for buttons containing "Xem thêm" text
+            if not clicked:
+                try:
+                    clicked = self.page.evaluate("""
+                        () => {
+                            const buttons = Array.from(document.querySelectorAll('button, a, div, span'));
+                            for (const btn of buttons) {
+                                const text = (btn.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                                if (text.includes('xem thêm') || text.includes('xem them') || text.includes('them')) {
+                                    // Check if it looks like a button
+                                    const style = window.getComputedStyle(btn);
+                                    const hasPointer = style.cursor === 'pointer';
+                                    const isButton = btn.tagName === 'BUTTON' || btn.tagName === 'A';
+                                    const hasClickHandler = btn.onclick || btn.getAttribute('onclick');
+                                    if (hasPointer || isButton || hasClickHandler) {
+                                        btn.click();
+                                        return true;
+                                    }
+                                }
+                            }
+                            return false;
+                        }
+                    """)
+                    if clicked:
+                        logging.info("Clicked load-more button via page evaluation")
+                except Exception:
+                    pass
+            
+            if not clicked:
+                return False
+            
+            # Wait for table to append more data (row count increases)
+            start_time = time.time()
+            while time.time() - start_time < timeout:
+                self.page.wait_for_timeout(200)
+                html_after = self.page.content()
+                new_row_count = self.get_table_row_count(html_after)
+                if new_row_count > prev_row_count:
+                    logging.info("Table successfully appended data: row count went from %d to %d", prev_row_count, new_row_count)
+                    return True
+            
+            logging.warning("Timeout waiting for table to append data after click. Row count remained at %d", prev_row_count)
+            return False
+        except Exception as e:
+            logging.warning("Error in click_load_more: %s", e)
+            return False
+
+    def get_table_dates(self, html: str) -> tuple[date | None, date | None]:
+        """Extract min and max dates from historical price table in HTML. Returns (min_date, max_date)."""
+        soup = BeautifulSoup(html, "html.parser")
+        dates_found = []
+        
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
+                if len(cells) < 2:
+                    continue
+                
+                # Try to parse date from first cells
+                for cell in cells[:3]:
+                    # Try formats: dd/mm/yyyy, dd/mm/yy
+                    for fmt in ["%d/%m/%Y", "%d/%m/%y"]:
+                        try:
+                            parsed = datetime.strptime(cell.strip(), fmt).date()
+                            dates_found.append(parsed)
+                            break
+                        except ValueError:
+                            continue
+        
+        if dates_found:
+            return min(dates_found), max(dates_found)
+        return None, None
+
+    def get_table_row_count(self, html: str) -> int:
+        """Count data rows in historical price table."""
+        soup = BeautifulSoup(html, "html.parser")
+        row_count = 0
+        for table in soup.find_all("table"):
+            for row in table.find_all("tr"):
+                cells = row.find_all(["td", "th"])
+                if len(cells) >= 8:  # Valid data row
+                    row_count += 1
+        return row_count
