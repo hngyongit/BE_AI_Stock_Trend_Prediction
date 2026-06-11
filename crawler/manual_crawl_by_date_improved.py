@@ -1050,16 +1050,7 @@ def main():
         hose_market_id = hose_market["_id"] if hose_market else None
 
         total = len(stocks)
-        
-        # Tracking states
-        success_first = []
-        success_retry = []
-        failed_retry = []
-        skipped_list = []
-        
-        retry_symbols = []
-        
-        cnt_inserted = cnt_updated = 0
+        cnt_fetched = cnt_inserted = cnt_updated = cnt_failed = cnt_skipped = cnt_skipped_exists = 0
 
         logger.info("\n" + "═" * 70)
         logger.info(f"🚀 Bắt đầu crawl {total} mã HOSE ngày {target_date}")
@@ -1145,6 +1136,21 @@ def main():
                         "debug_provider": args.debug_provider,
                     }
 
+                    # Check if data already exists in factMarketPrices
+                    if not is_dry_run:
+                        exists_query = {
+                            "stock_id": stock_id,
+                            "time_id": time_id,
+                            "data_source_id": current_ds_id
+                        }
+                        if db[COL_FACT_MARKET_PRICES].count_documents(exists_query, limit=1) > 0:
+                            cnt_skipped += 1
+                            cnt_skipped_exists += 1
+                            date_str = target_date.strftime("%Y-%m-%d")
+                            logger.info(f"[SKIP] {symbol} - Data already exists for {date_str}")
+                            write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "SKIPPED", "Data already exists")
+                            continue
+
                     raw_data, source_used, provider_errors = fetch_market_price(symbol, target_date, context, providers)
 
                     if raw_data is None:
@@ -1217,13 +1223,9 @@ def main():
                 if args.delay > 0 and len(retry_symbols) > 0:
                     time.sleep(args.delay)
 
-        cnt_fetched = len(success_first) + len(success_retry)
-        cnt_failed = len(failed_retry)
-        cnt_skipped = len(skipped_list)
-
-        if cnt_failed == 0 and cnt_fetched > 0:
+        if cnt_failed == 0 and (cnt_fetched > 0 or cnt_skipped_exists > 0):
             final_status = "SUCCESS"
-        elif cnt_fetched == 0 and cnt_failed == 0:
+        elif cnt_fetched == 0 and cnt_failed == 0 and cnt_skipped_exists == 0:
             final_status = "FAILED"
         elif cnt_failed > 0 and (cnt_inserted + cnt_updated) == 0:
             final_status = "FAILED"

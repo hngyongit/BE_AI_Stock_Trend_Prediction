@@ -213,6 +213,20 @@ class MongoDBService:
         }
         col.insert_one(quality_doc)
 
+    def check_market_price_exists(self, stock_id: ObjectId, time_id: int, data_source_id: ObjectId) -> bool:
+        """
+        Kiểm tra xem dữ liệu market price của stock_id tại ngày time_id từ nguồn data_source_id đã tồn tại chưa.
+        """
+        if not self.is_connected() or not stock_id or not time_id or not data_source_id:
+            return False
+        col = self.db["factMarketPrices"]
+        query = {
+            "stock_id": stock_id,
+            "time_id": time_id,
+            "data_source_id": data_source_id
+        }
+        return col.count_documents(query, limit=1) > 0
+
     def save_market_price(self, record: Dict[str, Any], stock_id: ObjectId, market_id: ObjectId,
                           industry_id: Optional[ObjectId], data_source_id: ObjectId) -> str:
         """
