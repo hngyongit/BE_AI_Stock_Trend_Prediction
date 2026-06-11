@@ -137,6 +137,7 @@ def run() -> None:
     records_inserted = 0
     records_updated = 0
     records_failed = 0
+    records_skipped = 0
 
     with VietstockBrowser() as browser:
         for idx, item in enumerate(configs, start=1):
@@ -192,6 +193,27 @@ def run() -> None:
                 if settings.save_to_mongodb and db_service.is_connected() and log_id:
                     db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SKIPPED", "Missing market_price_data_url")
                 continue
+
+            # Check if market price data already exists in MongoDB (Vietnamese timezone)
+            from vietstock_crawler.utils.date_utils import now_vn_dt
+            today_dt = now_vn_dt()
+            time_id = int(today_dt.strftime("%Y%m%d"))
+            date_str = today_dt.strftime("%Y-%m-%d")
+
+            if settings.save_to_mongodb and db_service.is_connected() and stock_id and data_source_id:
+                if db_service.check_market_price_exists(stock_id, time_id, data_source_id):
+                    logging.info(f"[SKIP] {symbol} - Data already exists for {date_str}")
+                    records_skipped += 1
+                    if log_id:
+                        db_service.write_crawl_log_detail(
+                            log_id=log_id,
+                            stock_id=stock_id,
+                            symbol=symbol,
+                            data_type="DAILY_MARKET_PRICE",
+                            status="SKIPPED",
+                            message="Data already exists"
+                        )
+                    continue
 
             # Retrieve or construct trading_stats_url
             trading_stats_url = item.get("trading_stats_url")
@@ -287,10 +309,13 @@ def run() -> None:
     # 6. Ghi logs tổng hợp cuối cùng & chất lượng
     ended_at = datetime.utcnow()
     status_summary = "SUCCESS" if records_failed == 0 else "PARTIAL_SUCCESS"
-    if records_fetched == records_failed:
+    if records_fetched == 0 and records_skipped == 0 and records_failed == 0:
+        status_summary = "FAILED"
+    elif records_fetched == records_failed and records_fetched > 0:
         status_summary = "FAILED"
 
     if settings.save_to_mongodb and db_service.is_connected() and log_id:
+        error_msg = f"Skipped: {records_skipped} mã đã có dữ liệu" if records_skipped > 0 else ""
         db_service.update_crawl_log(
             log_id=log_id,
             ended_at=ended_at,
@@ -298,7 +323,8 @@ def run() -> None:
             records_fetched=records_fetched,
             records_inserted=records_inserted,
             records_updated=records_updated,
-            records_failed=records_failed
+            records_failed=records_failed,
+            error_message=error_msg
         )
         db_service.write_crawl_quality(
             log_id=log_id,
@@ -342,9 +368,10 @@ def run() -> None:
 
     logging.info(
         f"\n=== Kết quả crawl: ===\n"
-        f"- Tổng số mã: {records_fetched}\n"
+        f"- Tổng số mã: {records_fetched + records_skipped}\n"
         f"- Thêm mới (Insert DB): {records_inserted}\n"
         f"- Cập nhật (Update DB): {records_updated}\n"
+        f"- Bỏ qua (Skipped): {records_skipped}\n"
         f"- Thất bại (Failed): {records_failed}\n"
         f"- Trạng thái: {status_summary}\n"
     )

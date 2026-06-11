@@ -1,4 +1,5 @@
 const authService = require('./auth.service');
+const env = require('../../config/env.config');
 const { success } = require('../../common/utils/response.util');
 
 /**
@@ -79,9 +80,48 @@ const register = async (req, res, next) => {
   }
 };
 
+/**
+ * After Google OAuth success: redirect to frontend with one-time ?code= (exchange via POST /oauth/exchange).
+ */
+const googleCallback = async (req, res, next) => {
+  try {
+    if (!req.user) {
+      const fail =
+        env.GOOGLE_OAUTH_FAILURE_REDIRECT ||
+        `${env.GOOGLE_OAUTH_SUCCESS_REDIRECT.replace(/\/$/, '')}?error=google_auth_failed`;
+      return res.redirect(fail);
+    }
+    const code = await authService.createGoogleOAuthExchangeCode(req.user);
+    const base = env.GOOGLE_OAUTH_SUCCESS_REDIRECT.replace(/\/$/, '');
+    const sep = base.includes('?') ? '&' : '?';
+    return res.redirect(`${base}${sep}code=${encodeURIComponent(code)}`);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Exchange one-time OAuth code for access + refresh tokens (see Google redirect flow).
+ */
+const exchangeOAuthCode = async (req, res, next) => {
+  try {
+    const { code } = req.body;
+    const data = authService.exchangeOAuthCode(code);
+    return success(res, 'OAuth exchange successful', {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      user: data.user
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   login,
   logout,
   refreshToken,
-  register
+  register,
+  googleCallback,
+  exchangeOAuthCode
 };

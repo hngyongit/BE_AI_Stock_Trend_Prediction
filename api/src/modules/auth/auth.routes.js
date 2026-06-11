@@ -1,8 +1,68 @@
 const express = require('express');
+const passport = require('passport');
 const router = express.Router();
+const env = require('../../config/env.config');
+const { error } = require('../../common/utils/response.util');
 const authController = require('./auth.controller');
 const authMiddleware = require('../../common/middlewares/auth.middleware');
-const { loginValidationRules, refreshTokenValidationRules, registerValidationRules, validate } = require('./auth.validation');
+const {
+  loginValidationRules,
+  refreshTokenValidationRules,
+  registerValidationRules,
+  oauthExchangeValidationRules,
+  validate
+} = require('./auth.validation');
+
+const ensureGoogleOAuthConfigured = (req, res, next) => {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    return error(res, 'Google OAuth is not configured', null, 503);
+  }
+  next();
+};
+
+const googleOAuthFailureRedirect =
+  env.GOOGLE_OAUTH_FAILURE_REDIRECT ||
+  `${env.GOOGLE_OAUTH_SUCCESS_REDIRECT.replace(/\/$/, '')}?error=google_auth_failed`;
+
+const googleOAuthScope = { scope: ['profile', 'email'] };
+
+const startGoogleLogin = (req, res, next) => {
+  delete req.session.googleOAuthMode;
+  req.session.save((err) => {
+    if (err) return next(err);
+    passport.authenticate('google', googleOAuthScope)(req, res, next);
+  });
+};
+
+const startGoogleRegister = (req, res, next) => {
+  req.session.googleOAuthMode = 'signup';
+  req.session.save((err) => {
+    if (err) return next(err);
+    passport.authenticate('google', googleOAuthScope)(req, res, next);
+  });
+};
+
+const googleOAuthCallbackHandler = (req, res, next) => {
+  passport.authenticate('google', (err, user) => {
+    if (err && err.statusCode === 409) {
+      const base = env.GOOGLE_OAUTH_SUCCESS_REDIRECT.replace(/\/$/, '');
+      const sep = base.includes('?') ? '&' : '?';
+      delete req.session.googleOAuthMode;
+      return req.session.save((saveErr) => {
+        if (saveErr) return next(saveErr);
+        return res.redirect(`${base}${sep}error=email_already_registered`);
+      });
+    }
+    if (err) return next(err);
+    if (!user) return res.redirect(googleOAuthFailureRedirect);
+    req.user = user;
+    delete req.session.googleOAuthMode;
+    req.session.save((saveErr) => {
+      if (saveErr) return next(saveErr);
+      return authController.googleCallback(req, res, next);
+    });
+  })(req, res, next);
+};
 
 /**
  * @openapi
@@ -10,6 +70,105 @@ const { loginValidationRules, refreshTokenValidationRules, registerValidationRul
  *   name: Auth
  *   description: User authentication and token management
  */
+
+/**
+ * @openapi
+ * /api/auth/google:
+ *   get:
+ *     summary: Start Google OAuth (sign in)
+ *     description: Redirects to Google. Existing email accounts can be linked when email is verified on Google. Use `/google/register` for sign-up-only (reject if email already exists).
+ *     tags: [Auth]
+ *     responses:
+ *       302:
+ *         description: Redirect to Google authorization page.
+ *       503:
+ *         description: Google OAuth is not configured on the server.
+ */
+router.get('/google', ensureGoogleOAuthConfigured, startGoogleLogin);
+
+/**
+ * @openapi
+ * /api/auth/google/register:
+ *   get:
+ *     summary: Start Google OAuth (sign up)
+ *     description: Same Google flow as sign-in, but if the email already belongs to another account (e.g. registered with password), the user is redirected back with `error=email_already_registered` instead of linking.
+ *     tags: [Auth]
+ *     responses:
+ *       302:
+ *         description: Redirect to Google authorization page.
+ *       503:
+ *         description: Google OAuth is not configured on the server.
+ */
+router.get('/google/register', ensureGoogleOAuthConfigured, startGoogleRegister);
+
+if (env.NODE_ENV === 'development') {
+  router.get('/google/oauth-config', (req, res) => {
+    res.json({
+      GOOGLE_CALLBACK_URL: env.GOOGLE_CALLBACK_URL,
+      hints: [
+        'Paste GOOGLE_CALLBACK_URL into Google Cloud → APIs & Credentials → your OAuth client → Authorized redirect URIs (exact match).',
+        'If you open Google login from a public API URL (e.g. DigitalOcean), set GOOGLE_CALLBACK_URL on that server to https://your-domain/api/auth/google/callback — not http://localhost:5000/...',
+        'If you use 127.0.0.1 in the browser, add a separate redirect URI for http://127.0.0.1:5000/api/auth/google/callback or always use http://localhost:5000.'
+      ]
+    });
+  });
+}
+
+/**
+ * @openapi
+ * /api/auth/google/callback:
+ *   get:
+ *     summary: Google OAuth callback
+ *     description: |
+ *       Completes Google login or register, then redirects to GOOGLE_OAUTH_SUCCESS_REDIRECT with a one-time `code` query param (or `error=email_already_registered` after sign-up if email is taken, or `error=google_auth_failed` on auth failure).
+ *       Exchange a success `code` via POST /api/auth/oauth/exchange for JWTs.
+ *     tags: [Auth]
+ *     responses:
+ *       302:
+ *         description: Redirect to frontend with ?code=..., ?error=email_already_registered, or ?error=google_auth_failed
+ *       503:
+ *         description: Google OAuth is not configured on the server.
+ */
+router.get(
+  '/google/callback',
+  ensureGoogleOAuthConfigured,
+  googleOAuthCallbackHandler
+);
+
+/**
+ * @openapi
+ * /api/auth/oauth/exchange:
+ *   post:
+ *     summary: Exchange Google OAuth one-time code for tokens
+ *     description: |
+ *       After Google login, the user lands on the frontend with `code` in the query string.
+ *       POST that code once to receive `access_token`, `refresh_token`, and `user`.
+ *       The code expires in a few minutes and is single-use (in-memory store; use Redis in production for multiple instances).
+ *     tags: [Auth]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - code
+ *             properties:
+ *               code:
+ *                 type: string
+ *                 description: One-time code from the Google success redirect.
+ *     responses:
+ *       200:
+ *         description: Tokens issued.
+ *       400:
+ *         description: Invalid or expired code.
+ */
+router.post(
+  '/oauth/exchange',
+  oauthExchangeValidationRules,
+  validate,
+  authController.exchangeOAuthCode
+);
 
 /**
  * @openapi

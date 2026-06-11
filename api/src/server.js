@@ -1,5 +1,6 @@
 const app = require('./app');
 const appConfig = require('./config/app.config');
+const env = require('./config/env.config');
 const connectDB = require('./config/database.config');
 const seedRolesAndUsers = require('./database/seeds/seed-roles');
 
@@ -15,6 +16,12 @@ const startServer = async () => {
     // 3. Start Listening
     const server = app.listen(appConfig.port, () => {
       console.log(`[Server] API server running on port ${appConfig.port} in [${appConfig.env}] mode`);
+      if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
+        console.log(
+          `[Server] Google OAuth: add this EXACT string to Google Cloud → Credentials → Authorized redirect URIs:\n` +
+            `       ${env.GOOGLE_CALLBACK_URL}`
+        );
+      }
     });
 
     // 4. Graceful Shutdown

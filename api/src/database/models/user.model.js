@@ -23,7 +23,15 @@ const UserSchema = new mongoose.Schema(
     },
     password_hash: {
       type: String,
-      required: true
+      default: null
+    },
+    google_id: {
+      type: String,
+      default: null,
+      sparse: true,
+      unique: true,
+      trim: true,
+      index: true
     },
     status: {
       type: String,

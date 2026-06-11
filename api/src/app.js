@@ -2,7 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const session = require('express-session');
+const passport = require('passport');
 const appConfig = require('./config/app.config');
+const configurePassport = require('./config/passport.config');
 const errorMiddleware = require('./common/middlewares/error.middleware');
 const authRouter = require('./modules/auth/auth.routes');
 const { usersRouter, adminUsersRouter } = require('./modules/users/users.routes');
@@ -15,6 +18,8 @@ const swaggerSpec = require('./config/swagger.config');
 
 const app = express();
 
+configurePassport();
+
 // Set security HTTP headers (disable Content Security Policy to allow Swagger UI inline assets)
 app.use(helmet({
   contentSecurityPolicy: false
@@ -25,6 +30,24 @@ app.use(cors(appConfig.corsOptions));
 
 // HTTP request logging
 app.use(morgan(appConfig.env === 'development' ? 'dev' : 'combined'));
+
+// Session for Passport OAuth state (short-lived cookie)
+app.use(
+  session({
+    secret: appConfig.sessionSecret,
+    resave: false,
+    // Passport OAuth2 stores `state` in session before redirecting to Google; must allow saving new sessions.
+    saveUninitialized: true,
+    cookie: {
+      secure: appConfig.isProduction,
+      httpOnly: true,
+      maxAge: 15 * 60 * 1000,
+      sameSite: 'lax'
+    }
+  })
+);
+app.use(passport.initialize());
+app.use(passport.session());
 
 // Parse JSON and urlencoded request bodies
 app.use(express.json());

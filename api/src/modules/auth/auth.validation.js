@@ -45,9 +45,19 @@ const registerValidationRules = [
     .isLength({ min: 8 }).withMessage('Password must be at least 8 characters long')
 ];
 
+const oauthExchangeValidationRules = [
+  body('code')
+    .notEmpty()
+    .withMessage('Exchange code is required')
+    .trim()
+    .isLength({ min: 32, max: 64 })
+    .withMessage('Invalid exchange code')
+];
+
 module.exports = {
   loginValidationRules,
   refreshTokenValidationRules,
   registerValidationRules,
+  oauthExchangeValidationRules,
   validate
 };
