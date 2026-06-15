@@ -271,7 +271,7 @@ Dịch vụ Python Crawler chịu trách nhiệm thu thập thông tin tài chí
 * **Cơ chế**: Trigger tự động từ phía Backend API hoặc Crontab hệ thống để chạy định kỳ sau giờ đóng cửa sàn giao dịch.
 * **Input**: Sự kiện lập lịch hoặc cấu hình job tự động.
 * **Output**: Tự động lấy giá đóng cửa và chỉ số giao dịch ngày hôm nay của toàn bộ danh mục cổ phiếu active.
-* **Collection ghi dữ liệu**: `factMarketPrices`, `crawlLogs`, `crawlLogDetails`, `factCrawlQualities`.
+* **Collection ghi dữ liệu**: `factMarketPrices`, `crawlLogs`, `crawlLogDetails`, `factCrawlQualities`. Khi bật `ENABLE_DAILY_MARKET_OVERVIEW` (mặc định trong `crawler/.env`), sau mỗi lần chạy `python run.py` còn ghi thêm một bản ghi KQGD vào `market_overviews` (cùng lịch với job giá ngày).
 
 ### 🛠️ 2. Manual Crawl (CLI Tool)
 * **Cơ chế**: Kích hoạt thủ công bởi Staff/Admin qua CLI trên server để cào bù dữ liệu khi có sự cố.
@@ -288,8 +288,9 @@ Dịch vụ Python Crawler chịu trách nhiệm thu thập thông tin tài chí
 * **Collection ghi dữ liệu**: Lấy và ghi vào `factMarketPrices` liên kết với khóa `time_id` trong `dimTimes`.
 
 ### 🏛️ 4. Market Overview Crawl
-* **Mục đích**: Thu thập thông số tổng hợp của sàn giao dịch (Tổng vốn hóa toàn sàn, số lượng mã tăng/giảm, giá trị giao dịch thỏa thuận).
-* **Collection ghi dữ liệu**: `factMarketOverviews`.
+* **Mục đích**: Thu thập một dòng thống kê giá/KQGD (theo trang Vietstock KQGD) để đồng bộ snapshot ngày.
+* **Chạy daily**: Gắn vào cùng job `python run.py` (thư mục `crawler/`, `PYTHONPATH=src`), sau khi crawl market price xong. Tắt bằng `ENABLE_DAILY_MARKET_OVERVIEW=false` trong `.env` của crawler nếu chỉ muốn chạy tay.
+* **Collection ghi dữ liệu**: `market_overviews` (MongoDB).
 
 ### 📁 5. Financial Crawl
 * **Mục đích**: Cào dữ liệu báo cáo tài chính doanh nghiệp theo từng quý (Doanh thu thuần, lợi nhuận gộp, tổng tài sản, nợ phải trả, vốn chủ sở hữu, tiền gửi khách hàng...).

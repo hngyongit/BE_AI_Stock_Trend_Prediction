@@ -578,3 +578,99 @@ class MongoDBService:
             col.insert_one(report_doc)
             logger.info(f"[MongoDB] Inserted financial report source for stock_id {stock_id} on {period_name}")
             return "INSERT"
+    # ────────────────────────────────────────────────────────────
+    # Market Overview (collection: market_overviews)
+    # ────────────────────────────────────────────────────────────
+
+    COLLECTION_MARKET_OVERVIEWS = "market_overviews"
+
+    def ensure_market_overview_indexes(self) -> None:
+        """Create indexes for the market_overviews collection."""
+        if not self.is_connected():
+            logger.warning("[MongoDB] Not connected. Cannot create market_overview indexes.")
+            return
+        col = self.db[self.COLLECTION_MARKET_OVERVIEWS]
+        col.create_index(
+            [("trading_date", 1), ("symbol", 1)],
+            unique=True,
+            name="idx_unique_trading_date_symbol",
+        )
+        col.create_index(
+            [("symbol", 1), ("trading_date", -1)],
+            name="idx_symbol_trading_date_desc",
+        )
+        col.create_index(
+            [("market", 1), ("trading_date", -1)],
+            name="idx_market_trading_date_desc",
+        )
+        logger.info("[MongoDB] Market overview indexes ensured.")
+
+    def upsert_market_overview(self, data: Dict[str, Any]) -> str:
+        """
+        Insert or update a single market overview record.
+
+        Uses (trading_date, symbol) as the unique filter.
+        Returns 'INSERT', 'UPDATE', or 'FAILED'.
+        """
+        if not self.is_connected():
+            logger.warning("[MongoDB] Not connected. Cannot upsert market overview.")
+            return "FAILED"
+
+        trading_date = data.get("trading_date")
+        symbol = data.get("symbol")
+
+        if not trading_date or not symbol:
+            logger.warning(
+                f"[MongoDB] upsert_market_overview: missing trading_date or symbol. "
+                f"trading_date={trading_date!r}, symbol={symbol!r}"
+            )
+            return "FAILED"
+
+        col = self.db[self.COLLECTION_MARKET_OVERVIEWS]
+        now = datetime.utcnow()
+
+        doc: Dict[str, Any] = {
+            "trading_date": trading_date,
+            "symbol": symbol,
+            "display_symbol": data.get("display_symbol"),
+            "market": data.get("market"),
+            "reference_index": data.get("reference_index"),
+            "open_index": data.get("open_index"),
+            "close_index": data.get("close_index"),
+            "high_index": data.get("high_index"),
+            "low_index": data.get("low_index"),
+            "change_value": data.get("change_value"),
+            "change_percent": data.get("change_percent"),
+            "matched_volume": data.get("matched_volume"),
+            "matched_value": data.get("matched_value"),
+            "put_through_volume": data.get("put_through_volume"),
+            "put_through_value": data.get("put_through_value"),
+            "total_volume": data.get("total_volume"),
+            "total_value": data.get("total_value"),
+            "market_cap": data.get("market_cap"),
+            "last_trading_time": data.get("last_trading_time"),
+            "source": data.get("source"),
+            "raw_data": data.get("raw_data"),
+            "updated_at": now,
+        }
+
+        filter_query = {
+            "trading_date": trading_date,
+            "symbol": symbol,
+        }
+
+        existing = col.find_one(filter_query)
+        if existing:
+            doc.pop("created_at", None)  # preserve original created_at
+            col.update_one(filter_query, {"$set": doc})
+            logger.info(
+                f"[MongoDB] Updated market overview: {symbol} @ {trading_date}"
+            )
+            return "UPDATE"
+        else:
+            doc["created_at"] = now
+            col.insert_one(doc)
+            logger.info(
+                f"[MongoDB] Inserted market overview: {symbol} @ {trading_date}"
+            )
+            return "INSERT"

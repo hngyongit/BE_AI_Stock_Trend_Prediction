@@ -593,6 +593,19 @@ def run() -> None:
         )
         logging.info("[MongoDB] Đã cập nhật xong CrawlLog và CrawlQuality.")
 
+    # 6b. Market overview (KQGD) — cùng nhịp daily với market price khi bật MongoDB
+    if (
+        settings.enable_daily_market_overview
+        and settings.save_to_mongodb
+        and db_service.is_connected()
+    ):
+        try:
+            from vietstock_crawler.jobs.market_overview_daily import run_daily_market_overview
+
+            run_daily_market_overview(db_service)
+        except Exception as exc:
+            logging.error("[MarketOverview] Job failed: %s", exc, exc_info=True)
+
     # 7. Lưu Google Sheets (nếu được bật)
     if settings.save_to_gsheet and spreadsheet:
         try:

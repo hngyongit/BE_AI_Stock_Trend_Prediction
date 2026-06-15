@@ -87,6 +87,9 @@ class Settings:
     dry_run: bool
     crawl_limit: int
 
+    # After daily symbol crawl: run KQGD market overview (Playwright) once → MongoDB
+    enable_daily_market_overview: bool
+
     @classmethod
     def from_env(cls) -> "Settings":
         load_dotenv()
@@ -135,6 +138,7 @@ class Settings:
             openai_model=os.getenv("OPENAI_MODEL", "gpt-5.5").strip(),
             dry_run=env_bool("DRY_RUN", False),
             crawl_limit=env_int("CRAWL_LIMIT", 0),
+            enable_daily_market_overview=env_bool("ENABLE_DAILY_MARKET_OVERVIEW", True),
         )
 
     def validate_required(self) -> None:
