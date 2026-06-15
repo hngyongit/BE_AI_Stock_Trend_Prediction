@@ -27,11 +27,9 @@ const UserSchema = new mongoose.Schema(
     },
     google_id: {
       type: String,
-      default: null,
       sparse: true,
       unique: true,
-      trim: true,
-      index: true
+      trim: true
     },
     status: {
       type: String,
@@ -45,6 +43,30 @@ const UserSchema = new mongoose.Schema(
     last_login_at: {
       type: Date,
       default: null
+    },
+    plan: {
+      type: String,
+      enum: ['FREE', 'PRO'],
+      default: 'FREE'
+    },
+    subscription_status: {
+      type: String,
+      enum: ['NONE', 'ACTIVE', 'EXPIRED', 'CANCELLED'],
+      default: 'NONE'
+    },
+    subscription_expires_at: {
+      type: Date,
+      default: null
+    },
+    payos_order_code: {
+      type: Number,
+      default: null,
+      sparse: true
+    },
+    payos_payment_link_id: {
+      type: String,
+      default: null,
+      sparse: true
     }
   },
   {

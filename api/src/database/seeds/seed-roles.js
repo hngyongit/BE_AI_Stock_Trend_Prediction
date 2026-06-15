@@ -56,6 +56,26 @@ const seedRolesAndUsers = async () => {
         password: 'locked123456',
         role: 'USER',
         status: 'LOCKED'
+      },
+      {
+        full_name: 'Pro User',
+        email: 'pro@example.com',
+        password: 'pro123456',
+        role: 'USER',
+        status: 'ACTIVE',
+        plan: 'PRO',
+        subscription_status: 'ACTIVE',
+        subscription_expires_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days from now
+      },
+      {
+        full_name: 'Expired Pro User',
+        email: 'expired@example.com',
+        password: 'expired123456',
+        role: 'USER',
+        status: 'ACTIVE',
+        plan: 'PRO',
+        subscription_status: 'EXPIRED',
+        subscription_expires_at: new Date(Date.now() - 1 * 24 * 60 * 60 * 1000) // 1 day ago
       }
     ];
 
@@ -63,13 +83,17 @@ const seedRolesAndUsers = async () => {
       let user = await User.findOne({ email: u.email });
       if (!user) {
         const hashedPassword = await bcrypt.hash(u.password, env.BCRYPT_SALT_ROUNDS || 10);
-        user = await User.create({
+        const userData = {
           full_name: u.full_name,
           email: u.email,
           password_hash: hashedPassword,
           role_id: rolesMap[u.role],
-          status: u.status
-        });
+          status: u.status,
+          plan: u.plan || 'FREE',
+          subscription_status: u.subscription_status || 'NONE',
+          subscription_expires_at: u.subscription_expires_at || null
+        };
+        user = await User.create(userData);
         console.log(`[Seed] Created user: ${u.email} (${u.role})`);
       } else {
         console.log(`[Seed] User ${u.email} already exists.`);

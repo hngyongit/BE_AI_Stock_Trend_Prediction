@@ -11,7 +11,10 @@ const formatUser = (user, includeTimestamps = false) => {
     full_name: user.full_name,
     email: user.email,
     role: roleName,
-    status: user.status
+    status: user.status,
+    plan: user.plan || 'FREE',
+    subscription_status: user.subscription_status || 'NONE',
+    subscription_expires_at: user.subscription_expires_at || null
   };
 
   if (includeTimestamps) {

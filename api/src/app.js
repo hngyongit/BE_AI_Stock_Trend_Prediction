@@ -12,6 +12,7 @@ const { usersRouter, adminUsersRouter } = require('./modules/users/users.routes'
 const { stocksRouter, adminStocksRouter } = require('./modules/stocks/stocks.routes');
 const watchlistsRouter = require('./modules/watchlists/watchlists.routes');
 const { dashboardRouter } = require('./modules/dashboard/dashboard.routes');
+const subscriptionsRouter = require('./modules/subscriptions/subscriptions.routes');
 const { error } = require('./common/utils/response.util');
 
 const swaggerUi = require('swagger-ui-express');
@@ -50,6 +51,9 @@ app.use(
 app.use(passport.initialize());
 app.use(passport.session());
 
+// Raw body parser for PayOS webhook (must be BEFORE express.json so it gets the raw buffer)
+app.use('/api/subscriptions/webhook', express.raw({ type: 'application/json', limit: '10mb' }));
+
 // Parse JSON and urlencoded request bodies
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -65,6 +69,7 @@ app.use('/api/stocks', stocksRouter);
 app.use('/api/admin/stocks', adminStocksRouter);
 app.use('/api/watchlists', watchlistsRouter);
 app.use('/api/dashboard', dashboardRouter);
+app.use('/api/subscriptions', subscriptionsRouter);
 
 // Health check endpoint
 app.get('/', (req, res) => {

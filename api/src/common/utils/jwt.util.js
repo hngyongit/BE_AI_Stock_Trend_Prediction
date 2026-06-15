@@ -18,7 +18,8 @@ const generateAccessToken = (user) => {
   const payload = {
     user_id: user._id || user.id,
     email: user.email,
-    role: roleName
+    role: roleName,
+    plan: user.plan || 'FREE'
   };
 
   return jwt.sign(payload, jwtConfig.accessSecret, {

@@ -30,10 +30,15 @@ const deleteWatchlistEntry = async (userId, stockId) => {
   return Watchlist.deleteOne({ user_id: userId, stock_id: stockId });
 };
 
+const deleteMultipleWatchlistEntries = async (userId, stockIds) => {
+  return Watchlist.deleteMany({ user_id: userId, stock_id: { $in: stockIds } });
+};
+
 module.exports = {
   findUserWatchlist,
   countUserWatchlist,
   findWatchlistEntry,
   createWatchlistEntry,
-  deleteWatchlistEntry
+  deleteWatchlistEntry,
+  deleteMultipleWatchlistEntries
 };
