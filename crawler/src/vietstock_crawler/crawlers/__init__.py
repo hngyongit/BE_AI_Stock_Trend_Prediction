@@ -1,4 +1,3 @@
-"""Crawlers for Vietstock data."""
-from BE_AI_Stock_Trend_Prediction.crawler.scripts.market_overview_crawler import crawl_market_overview, main
+"""Crawlers for Vietstock data (package entry; heavy crawlers live under ``jobs/`` and ``scripts/``)."""
 
-__all__ = ["crawl_market_overview", "main"]
+__all__: list[str] = []

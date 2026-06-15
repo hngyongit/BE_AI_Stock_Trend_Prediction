@@ -16,5 +16,6 @@ Important keys:
 - `ALLOW_INCOMPLETE_CURRENT_QUARTER_SHEET`: allow current unfinished quarter as output suffix.
 - `QUARTER_SHEET_OVERRIDE`: manual quarter suffix such as `Q1_2026`.
 - `ENABLE_LLM`: optional future LLM layer; disabled by default.
+- `ENABLE_DAILY_MARKET_OVERVIEW` (default `true`): sau khi crawl giá (daily), chạy thêm một lần crawler KQGD / thống kê giá (Playwright) và ghi `market_overviews` trên MongoDB. Tắt bằng `false` nếu chỉ muốn chạy tay hoặc tách job riêng.
 
 Never commit `.env`.

@@ -340,3 +340,78 @@ def _sanitize_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
         else:
             safe[k] = str(v) if v is not None else None
     return safe
+
+
+def normalize_kqgd_playwright_row(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Map output of `scripts/market_overview_crawler.normalize_row` -> MongoDB market_overviews shape.
+
+    The Playwright crawler uses *price* field names (open_price, close_price, …) for one table row;
+    MongoDB uses the shared overview schema (*_index* names + ``symbol``).
+    """
+    if raw is None or not isinstance(raw, dict):
+        logger.warning("normalize_kqgd_playwright_row: raw is not a dict")
+        return None
+
+    td = raw.get("trading_date")
+    if not td:
+        logger.warning("normalize_kqgd_playwright_row: missing trading_date")
+        return None
+
+    stock_code = raw.get("stock_code") or raw.get("StockCode") or ""
+    if not str(stock_code).strip():
+        logger.warning("normalize_kqgd_playwright_row: missing stock_code")
+        return None
+
+    record = empty_market_overview_record()
+    record["trading_date"] = str(td).strip()[:10]
+    record["display_symbol"] = str(raw.get("stock_name") or stock_code).strip()
+    record["symbol"] = normalize_market_symbol(stock_code)
+    if not record["symbol"]:
+        record["symbol"] = str(stock_code).strip().upper()
+    record["market"] = detect_market_from_symbol(record["symbol"])
+
+    field_map = [
+        ("reference_price", "reference_index"),
+        ("open_price", "open_index"),
+        ("close_price", "close_index"),
+        ("highest_price", "high_index"),
+        ("lowest_price", "low_index"),
+        ("price_change", "change_value"),
+        ("price_change_percent", "change_percent"),
+        ("matched_volume", "matched_volume"),
+        ("matched_value", "matched_value"),
+        ("put_through_volume", "put_through_volume"),
+        ("put_through_value", "put_through_value"),
+        ("total_volume", "total_volume"),
+        ("total_value", "total_value"),
+        ("market_cap", "market_cap"),
+    ]
+    for src, dst in field_map:
+        record[dst] = parse_number(raw.get(src))
+
+    record["source"] = raw.get("source") or "vietstock_playwright"
+    record["raw_data"] = _sanitize_raw(raw)
+
+    for field in NUMERIC_FIELDS:
+        val = record.get(field)
+        if val is not None:
+            try:
+                record[field] = float(val)
+            except (TypeError, ValueError):
+                record[field] = None
+
+    errors = get_validation_errors(record)
+    if errors:
+        for err in errors:
+            logger.warning("normalize_kqgd_playwright_row: %s", err)
+        if "trading_date is required" in errors or "symbol is required" in errors:
+            return None
+        if any("high_index" in e and "low_index" in e for e in errors):
+            logger.warning(
+                "normalize_kqgd_playwright_row: skip high < low: %s @ %s",
+                record.get("symbol"),
+                record.get("trading_date"),
+            )
+            return None
+
+    return record
