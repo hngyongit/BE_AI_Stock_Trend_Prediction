@@ -41,7 +41,15 @@ const env = {
   /** Frontend URL to receive ?code= after Google login (exchange via POST /oauth/exchange). */
   GOOGLE_OAUTH_SUCCESS_REDIRECT:
     trimStr(process.env.GOOGLE_OAUTH_SUCCESS_REDIRECT) || 'http://localhost:3000',
-  GOOGLE_OAUTH_FAILURE_REDIRECT: trimStr(process.env.GOOGLE_OAUTH_FAILURE_REDIRECT, '')
+  GOOGLE_OAUTH_FAILURE_REDIRECT: trimStr(process.env.GOOGLE_OAUTH_FAILURE_REDIRECT, ''),
+  // PayOS Configuration
+  PAYOS_CLIENT_ID: trimStr(process.env.PAYOS_CLIENT_ID, ''),
+  PAYOS_API_KEY: trimStr(process.env.PAYOS_API_KEY, ''),
+  PAYOS_CHECKSUM_KEY: trimStr(process.env.PAYOS_CHECKSUM_KEY, ''),
+  PAYOS_RETURN_URL: trimStr(process.env.PAYOS_RETURN_URL, ''),
+  PAYOS_CANCEL_URL: trimStr(process.env.PAYOS_CANCEL_URL, ''),
+  PAYOS_PRO_PRICE: parseInt(process.env.PAYOS_PRO_PRICE || '50000', 10)
 };
+
 
 module.exports = env;

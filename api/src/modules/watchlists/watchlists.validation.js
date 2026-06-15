@@ -28,8 +28,16 @@ const removeWatchlistValidation = [
     .toUpperCase()
 ];
 
+const trimWatchlistValidation = [
+  body('keepStockIds')
+    .isArray({ min: 1 }).withMessage('keepStockIds must be a non-empty array')
+    .custom((ids) => ids.every(id => typeof id === 'string' && id.length > 0))
+    .withMessage('Each keepStockId must be a non-empty string')
+];
+
 module.exports = {
   validate,
   addWatchlistValidation,
-  removeWatchlistValidation
+  removeWatchlistValidation,
+  trimWatchlistValidation
 };

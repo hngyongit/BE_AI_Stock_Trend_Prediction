@@ -12,6 +12,7 @@
     "test:stocks": "node test/test-stocks-watchlist-flow.js"
   },
   "dependencies": {
+    "@payos/node": "^2.0.5",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

@@ -19,7 +19,7 @@ const startServer = async () => {
       if (env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) {
         console.log(
           `[Server] Google OAuth: add this EXACT string to Google Cloud → Credentials → Authorized redirect URIs:\n` +
-            `       ${env.GOOGLE_CALLBACK_URL}`
+          `       ${env.GOOGLE_CALLBACK_URL}`
         );
       }
     });

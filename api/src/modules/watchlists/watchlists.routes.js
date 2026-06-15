@@ -3,10 +3,12 @@ const router = express.Router();
 
 const watchlistsController = require('./watchlists.controller');
 const authMiddleware = require('../../common/middlewares/auth.middleware');
+const { checkSubscriptionExpiry } = require('../../common/middlewares/subscription.middleware');
 const {
   validate,
   addWatchlistValidation,
-  removeWatchlistValidation
+  removeWatchlistValidation,
+  trimWatchlistValidation
 } = require('./watchlists.validation');
 
 /**
@@ -87,14 +89,14 @@ const {
  *       401:
  *         description: Unauthorized. Missing or invalid Bearer access token.
  */
-router.get('/', authMiddleware, watchlistsController.getWatchlist);
+router.get('/', authMiddleware, checkSubscriptionExpiry, watchlistsController.getWatchlist);
 
 /**
  * @openapi
  * /api/watchlists:
  *   post:
  *     summary: Add stock to personal watchlist
- *     description: Add a new stock symbol to the user's watchlist. Maximum limit is 5 stocks.
+ *     description: Add a new stock symbol to the user's watchlist. Maximum limit is 5 stocks for FREE plan, 50 for PRO.
  *     tags: [Watchlists]
  *     security:
  *       - bearerAuth: []
@@ -143,7 +145,7 @@ router.get('/', authMiddleware, watchlistsController.getWatchlist);
  *       404:
  *         description: Stock symbol not found in system.
  */
-router.post('/', authMiddleware, addWatchlistValidation, validate, watchlistsController.addWatchlist);
+router.post('/', authMiddleware, checkSubscriptionExpiry, addWatchlistValidation, validate, watchlistsController.addWatchlist);
 
 /**
  * @openapi
@@ -170,6 +172,39 @@ router.post('/', authMiddleware, addWatchlistValidation, validate, watchlistsCon
  *       404:
  *         description: Stock not found in your watchlist or symbol not found.
  */
-router.delete('/:symbol', authMiddleware, removeWatchlistValidation, validate, watchlistsController.removeWatchlist);
+router.delete('/:symbol', authMiddleware, checkSubscriptionExpiry, removeWatchlistValidation, validate, watchlistsController.removeWatchlist);
+
+/**
+ * @openapi
+ * /api/watchlists/trim:
+ *   post:
+ *     summary: Trim watchlist to specific stocks
+ *     description: Remove all stocks from watchlist except those specified in keepStockIds. Used when user is over limit after subscription expiry.
+ *     tags: [Watchlists]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - keepStockIds
+ *             properties:
+ *               keepStockIds:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 example: ["665f1a2b9c1e2a0012a99991", "665f1a2b9c1e2a0012a99992"]
+ *     responses:
+ *       200:
+ *         description: Watchlist trimmed successfully.
+ *       400:
+ *         description: Validation failed or keepStockIds exceeds plan limit.
+ *       401:
+ *         description: Unauthorized.
+ */
+router.post('/trim', authMiddleware, trimWatchlistValidation, validate, watchlistsController.trimWatchlist);
 
 module.exports = router;
