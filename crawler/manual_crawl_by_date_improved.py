@@ -1051,6 +1051,11 @@ def main():
 
         total = len(stocks)
         cnt_fetched = cnt_inserted = cnt_updated = cnt_failed = cnt_skipped = cnt_skipped_exists = 0
+        success_first = []
+        skipped_list = []
+        retry_symbols = []
+        success_retry = []
+        failed_retry = []
 
         logger.info("\n" + "═" * 70)
         logger.info(f"🚀 Bắt đầu crawl {total} mã HOSE ngày {target_date}")
@@ -1083,8 +1088,10 @@ def main():
                     success_first.append(symbol)
                     cnt_inserted += result.get("inserted", 0)
                     cnt_updated += result.get("updated", 0)
+                    cnt_fetched += 1
                 elif result["status"] == "SKIPPED":
                     skipped_list.append(symbol)
+                    cnt_skipped += 1
 
             except Exception as exc:
                 execution_time = time.time() - start_time
@@ -1120,24 +1127,14 @@ def main():
                 stock_id = stock["_id"]
                 reason = item["reason"]
 
-                logger.info(f"[{symbol}] Retry {attempt}/3")
+                logger.info(f"[{symbol}] Retry {attempt}/3 (Previous failure: {reason})")
 
                 start_time = time.time()
                 try:
-                    stock_ds = get_or_create_stock_data_source(db, stock, dry_run=is_dry_run)
-                    current_ds_id = stock_ds.get("_id") or data_source_id
-                    context = {
-                        "slug": slug,
-                        "market_price_data_url": stock_ds.get("market_price_data_url"),
-                        "trade_stats_url": stock_ds.get("trade_stats_url"),
-                        "financial_data_url": stock_ds.get("financial_data_url"),
-                        "max_load_more": args.max_load_more,
-                        "load_more_timeout": args.load_more_timeout,
-                        "debug_provider": args.debug_provider,
-                    }
-
                     # Check if data already exists in factMarketPrices
                     if not is_dry_run:
+                        stock_ds = get_or_create_stock_data_source(db, stock, dry_run=is_dry_run)
+                        current_ds_id = stock_ds.get("_id") or data_source_id
                         exists_query = {
                             "stock_id": stock_id,
                             "time_id": time_id,
@@ -1151,49 +1148,28 @@ def main():
                             write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "SKIPPED", "Data already exists")
                             continue
 
-                    raw_data, source_used, provider_errors = fetch_market_price(symbol, target_date, context, providers)
-
-                    if raw_data is None:
-                        cnt_skipped += 1
-                        msg = f"Không có dữ liệu cho ngày {target_date}. Provider errors: {' | '.join(provider_errors)}"
-                        logger.warning(f"  [{symbol}] {msg}")
-                        if not is_dry_run:
-                            write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "SKIPPED", msg)
-                        continue
-
-                    missing_required = get_missing_fields(raw_data, REQUIRED_FIELDS)
-                    missing_all = get_missing_fields(raw_data, ALL_QUALITY_FIELDS)
-                    completeness = calculate_data_completeness(raw_data)
-
-                    if missing_required:
-                        cnt_skipped += 1
-                        msg = f"Thiếu field bắt buộc: {missing_required}; completeness={completeness}%; source={source_used}"
-                        logger.warning(f"  [{symbol}] ⚠️ SKIPPED - {msg}")
-                        if not is_dry_run:
-                            write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "SKIPPED", msg)
-                        continue
-
-                    cnt_fetched += 1
-
-                    fact_doc = map_to_fact_market_price(
-                        raw_data=raw_data,
-                        stock_id=stock_id,
-                        market_id=market_id,
-                        industry_id=industry_id,
-                        data_source_id=current_ds_id,
+                    result = crawl_symbol_with_timeout(
+                        db=db,
+                        stock=stock,
+                        target_date=target_date,
+                        provider_names=provider_names,
+                        data_source_id=data_source_id,
                         time_id=time_id,
                         hose_market_id=hose_market_id,
                         is_dry_run=is_dry_run,
                         crawl_log_id=crawl_log_id,
                         timeout=settings.symbol_crawl_timeout
                     )
+
                     if result["status"] == "SUCCESS":
                         success_retry.append(symbol)
                         cnt_inserted += result.get("inserted", 0)
                         cnt_updated += result.get("updated", 0)
+                        cnt_fetched += 1
                         logger.info(f"  [{symbol}] Retried SUCCESS on attempt {attempt}")
                     elif result["status"] == "SKIPPED":
                         skipped_list.append(symbol)
+                        cnt_skipped += 1
                         logger.info(f"  [{symbol}] Retried SKIPPED on attempt {attempt}")
 
                 except Exception as exc:
@@ -1216,6 +1192,7 @@ def main():
                         })
                     else:
                         failed_retry.append(symbol)
+                        cnt_failed += 1
                         logger.error(f"  [{symbol}] FAILED AFTER 3 RETRIES")
                         if not is_dry_run:
                             write_crawl_log_detail(db, crawl_log_id, stock_id, symbol, "FAILED", f"FAILED AFTER 3 RETRIES: {new_reason}")
