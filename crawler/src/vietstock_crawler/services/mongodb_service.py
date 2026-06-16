@@ -429,12 +429,12 @@ class MongoDBService:
             "equity": clean_num(record.get("equity")),
             "retained_earnings": clean_num(record.get("retained_earnings")),
 
-            "eps": clean_num(record.get("eps_4q")),
-            "pe": clean_num(record.get("pe_basic")),
-            "forward_pe": None, # Không crawl được từ financial sheet trực tiếp
+            "eps": clean_num(record.get("eps_4q")) or clean_num(record.get("eps")),
+            "pe": clean_num(record.get("pe_basic")) or clean_num(record.get("pe")),
+            "forward_pe": clean_num(record.get("forward_pe")), # Không crawl được từ financial sheet trực tiếp
             "bvps": clean_num(record.get("bvps")),
-            "pb": None,
-            "beta": None,
+            "pb": clean_num(record.get("pb")),
+            "beta": clean_num(record.get("beta")),
             "ros": clean_num(record.get("ros")),
             "roe": clean_num(record.get("roe")),
             "roaa": clean_num(record.get("roaa")),

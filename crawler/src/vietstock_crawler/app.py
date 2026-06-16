@@ -372,101 +372,13 @@ def run() -> None:
                 if result["stats"]:
                     trading_records.append(result["stats"])
 
-            stock_id = item.get("stock_id")
-            market_id = item.get("market_id")
-            industry_id = item.get("industry_id")
-            
-            # Retrieve or create stock data source details from DB if connected
-            market_price_data_url = ""
-            data_source_id = item.get("data_source_id")
-            
-            if db_service.is_connected():
-                # 1. Resolve stock_id, market_id, industry_id if missing
-                if not stock_id:
-                    s_doc = db_service.db["dimstocks"].find_one({"symbol": symbol})
-                    if s_doc:
-                        stock_id = s_doc["_id"]
-                        market_id = s_doc.get("market_id")
-                        industry_id = s_doc.get("industry_id")
-                    else:
-                        # Auto-create stock if not found
-                        hose = db_service.db["dimMarkets"].find_one({"code": "HOSE"})
-                        market_id = hose["_id"] if hose else None
-                        new_stock = {
-                            "market_id": market_id,
-                            "industry_id": None,
-                            "symbol": symbol,
-                            "company_name": symbol,
-                            "status": "ACTIVE",
-                            "created_at": datetime.utcnow(),
-                            "updated_at": datetime.utcnow()
-                        }
-                        res = db_service.db["dimstocks"].insert_one(new_stock)
-                        stock_id = res.inserted_id
-                        logging.info(f"[MongoDB] Tự động tạo Stock mới cho {symbol} (ID: {stock_id})")
-                
-                # 2. Get data_source_id and market_price_data_url
-                data_source_id, market_price_data_url = db_service.get_or_create_stock_data_source(stock_id, symbol)
-            else:
-                # If not connected, use the URLs from configs or fallback
-                market_price_data_url = item.get("market_price_data_url") or item.get("profile_url") or f"https://finance.vietstock.vn/{slug}.htm"
-                data_source_id = None
-
-            # Skip checking/crawling if market_price_data_url is empty/null
-            if not market_price_data_url:
-                logging.warning(f"  [{symbol}] Missing market_price_data_url -> SKIPPED")
-                if settings.save_to_mongodb and db_service.is_connected() and log_id:
-                    db_service.write_crawl_log_detail(log_id, stock_id, symbol, "DAILY_MARKET_PRICE", "SKIPPED", "Missing market_price_data_url")
-                continue
-
-            # Check if market price data already exists in MongoDB (Vietnamese timezone)
-            from vietstock_crawler.utils.date_utils import now_vn_dt
-            today_dt = now_vn_dt()
-            time_id = int(today_dt.strftime("%Y%m%d"))
-            date_str = today_dt.strftime("%Y-%m-%d")
-
-            if settings.save_to_mongodb and db_service.is_connected() and stock_id and data_source_id:
-                if db_service.check_market_price_exists(stock_id, time_id, data_source_id):
-                    logging.info(f"[SKIP] {symbol} - Data already exists for {date_str}")
-                    records_skipped += 1
-                    if log_id:
-                        db_service.write_crawl_log_detail(
-                            log_id=log_id,
-                            stock_id=stock_id,
-                            symbol=symbol,
-                            data_type="DAILY_MARKET_PRICE",
-                            status="SKIPPED",
-                            message="Data already exists"
-                        )
-                    continue
-
-            # Retrieve or construct trading_stats_url
-            trading_stats_url = item.get("trading_stats_url")
-            if not trading_stats_url and db_service.is_connected() and stock_id:
-                ds = db_service.db["dimStockDataSources"].find_one({"stock_id": stock_id})
-                if ds:
-                    trading_stats_url = ds.get("trade_stats_url", "")
-            if not trading_stats_url or "finance.vietstock.vn" not in trading_stats_url:
-                trading_stats_url = f"https://finance.vietstock.vn/{symbol.lower()}/thong-ke-giao-dich.htm"
-
-            logging.info(f"=== [{idx}/{symbols_count}] Crawling {symbol} ===")
-            
-            try:
-                # 4. Thực hiện crawl
-                market, financial = crawl_company(
-                    symbol=symbol,
-                    slug=slug,
-                    browser=browser,
-                    profile_url=market_price_data_url,
-                    crawl_financial=settings.enable_financial_data,
-                )
-                
                 records_fetched += 1
                 records_inserted += result.get("inserted", 0)
                 records_updated += result.get("updated", 0)
                 records_failed += result.get("failed", 0)
             elif result["status"] == "SKIPPED":
                 skipped_list.append(symbol)
+                records_skipped += 1
 
         except Exception as exc:
             execution_time = time.time() - start_time
