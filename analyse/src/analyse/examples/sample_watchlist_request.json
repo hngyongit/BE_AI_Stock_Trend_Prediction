@@ -1,0 +1,30 @@
+{
+  "userId": "optional-user-id",
+  "stocks": [
+    {
+      "symbol": "VCB",
+      "data": {
+        "latest_price": {
+          "close_price": 88400,
+          "price_change_percent": 0.91,
+          "volume": 1850000
+        }
+      }
+    },
+    {
+      "symbol": "FPT",
+      "data": {
+        "latest_price": {
+          "close_price": 132500,
+          "price_change_percent": -0.38,
+          "volume": 2100000
+        }
+      }
+    }
+  ],
+  "options": {
+    "language": "vi",
+    "riskProfile": "medium",
+    "timeHorizon": "medium_term"
+  }
+}

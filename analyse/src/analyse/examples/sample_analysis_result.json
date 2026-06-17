@@ -1,0 +1,35 @@
+{
+  "success": true,
+  "data": {
+    "symbol": "VCB",
+    "summary": "Đây là ví dụ kết quả placeholder bằng tiếng Việt. Phân tích LLM chưa được triển khai.",
+    "dataQuality": {
+      "level": "MEDIUM",
+      "missingFields": [],
+      "notes": [
+        "Cần đối chiếu thêm dữ liệu tài chính và chất lượng crawl trước khi đưa ra nhận định."
+      ]
+    },
+    "trend": {
+      "direction": "UNCLEAR",
+      "confidence": 0.0,
+      "reasoning": [
+        "Skeleton chưa thực hiện tính toán xu hướng."
+      ]
+    },
+    "strengths": [],
+    "risks": [],
+    "signals": [],
+    "actionPlan": {
+      "shortTerm": [],
+      "mediumTerm": [],
+      "watchPoints": [
+        "Theo dõi giá đóng cửa, thanh khoản và biến động VNINDEX."
+      ],
+      "riskManagement": [
+        "Không dùng kết quả placeholder để ra quyết định giao dịch."
+      ]
+    },
+    "disclaimer": "Nội dung chỉ mang tính tham khảo, không phải khuyến nghị mua bán."
+  }
+}

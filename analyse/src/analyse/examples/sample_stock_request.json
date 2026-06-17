@@ -1,0 +1,58 @@
+{
+  "symbol": "VCB",
+  "data": {
+    "stock": {
+      "symbol": "VCB",
+      "company_name": "Ngân hàng TMCP Ngoại thương Việt Nam",
+      "market_code": "HOSE",
+      "status": "ACTIVE"
+    },
+    "latestPrice": {
+      "time_id": 20260615,
+      "open_price": 87600,
+      "high_price": 88900,
+      "low_price": 87000,
+      "close_price": 88400,
+      "volume": 1850000,
+      "price_change": 800,
+      "price_change_percent": 0.91,
+      "pe": 15.2,
+      "pb": 2.6,
+      "roe": 19.5
+    },
+    "priceHistory": [
+      {
+        "time": "2026-06-13",
+        "open": 86800,
+        "high": 87900,
+        "low": 86200,
+        "close": 87600,
+        "volume": 1640000
+      },
+      {
+        "time": "2026-06-15",
+        "open": 87600,
+        "high": 88900,
+        "low": 87000,
+        "close": 88400,
+        "volume": 1850000
+      }
+    ],
+    "marketOverview": {
+      "symbol": "VNINDEX",
+      "close_index": 1280.5,
+      "change_percent": 0.35,
+      "total_volume": 640199320
+    },
+    "financials": {},
+    "crawlQuality": {
+      "success_rate": 95.2,
+      "missing_fields": []
+    }
+  },
+  "options": {
+    "language": "vi",
+    "riskProfile": "medium",
+    "timeHorizon": "short_term"
+  }
+}
