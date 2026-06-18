@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const Role = require('../models/role.model');
 const User = require('../models/user.model');
+const SubscriptionTransaction = require('../models/subscription-transaction.model');
 const connectDB = require('../../config/database.config');
 const env = require('../../config/env.config');
 
@@ -97,6 +98,25 @@ const seedRolesAndUsers = async () => {
         console.log(`[Seed] Created user: ${u.email} (${u.role})`);
       } else {
         console.log(`[Seed] User ${u.email} already exists.`);
+      }
+
+      // Seed subscription transactions for PRO users
+      if (u.plan === 'PRO') {
+        const existingTx = await SubscriptionTransaction.findOne({ user_id: user._id });
+        if (!existingTx) {
+          await SubscriptionTransaction.create({
+            user_id: user._id,
+            transaction_type: 'PAYOS_PAYMENT',
+            amount: 50000,
+            status: 'PAID',
+            previous_plan: 'FREE',
+            new_plan: 'PRO',
+            previous_expires_at: null,
+            new_expires_at: u.subscription_expires_at || null,
+            notes: 'Seed data: initial PRO subscription'
+          });
+          console.log(`[Seed] Created transaction for: ${u.email}`);
+        }
       }
     }
 

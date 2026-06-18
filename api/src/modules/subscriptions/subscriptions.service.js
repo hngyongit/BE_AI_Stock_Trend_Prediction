@@ -1,4 +1,5 @@
 const User = require('../../database/models/user.model');
+const SubscriptionTransaction = require('../../database/models/subscription-transaction.model');
 const payosService = require('./payos.service');
 const { SUBSCRIPTION_PRICE, SUBSCRIPTION_DURATION_DAYS } = require('../../config/plan.config');
 const env = require('../../config/env.config');
@@ -91,11 +92,30 @@ const handlePaymentWebhook = async (webhookPayload) => {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + SUBSCRIPTION_DURATION_DAYS);
 
+    // Capture previous plan/expiry before updating
+    const previousPlan = user.plan;
+    const previousExpiresAt = user.subscription_expires_at;
+
     // Upgrade user
     user.plan = 'PRO';
     user.subscription_status = 'ACTIVE';
     user.subscription_expires_at = expiresAt;
     await user.save();
+
+    // Record transaction
+    await SubscriptionTransaction.create({
+        user_id: user._id,
+        transaction_type: 'PAYOS_PAYMENT',
+        payos_order_code: orderCode,
+        payos_payment_link_id: user.payos_payment_link_id,
+        amount: SUBSCRIPTION_PRICE,
+        status: 'PAID',
+        previous_plan: previousPlan,
+        new_plan: 'PRO',
+        previous_expires_at: previousExpiresAt,
+        new_expires_at: expiresAt,
+        notes: 'PayOS payment completed'
+    });
 
     return {
         userId: user._id,
@@ -125,8 +145,43 @@ const getSubscriptionStatus = async (userId) => {
     };
 };
 
+/**
+ * Get transaction history for the current user
+ * @param {string} userId - User ID
+ * @param {Object} queries - { page, limit }
+ * @returns {Promise<Object>} - { items, pagination }
+ */
+const getMyTransactions = async (userId, queries) => {
+    const page = parseInt(queries.page || '1', 10);
+    const limit = parseInt(queries.limit || '20', 10);
+    const skip = (page - 1) * limit;
+
+    const filter = { user_id: userId };
+
+    const items = await SubscriptionTransaction.find(filter)
+        .sort({ created_at: -1 })
+        .skip(skip)
+        .limit(limit);
+
+    const total_items = await SubscriptionTransaction.countDocuments(filter);
+    const total_pages = Math.ceil(total_items / limit);
+
+    return {
+        items: items.map(t => ({
+            id: t._id.toString(),
+            type: t.transaction_type,
+            amount: t.amount,
+            status: t.status,
+            notes: t.notes,
+            created_at: t.created_at
+        })),
+        pagination: { page, limit, total_items, total_pages }
+    };
+};
+
 module.exports = {
     createPayment,
     handlePaymentWebhook,
-    getSubscriptionStatus
+    getSubscriptionStatus,
+    getMyTransactions
 };

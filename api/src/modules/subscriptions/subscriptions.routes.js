@@ -121,4 +121,32 @@ router.post('/webhook', subscriptionsController.handleWebhook);
  */
 router.get('/status', authMiddleware, checkSubscriptionExpiry, subscriptionsController.getStatus);
 
+/**
+ * @openapi
+ * /api/subscriptions/transactions:
+ *   get:
+ *     summary: Get my transaction history
+ *     description: Returns paginated transaction history for the authenticated user.
+ *     tags: [Subscriptions]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *     responses:
+ *       200:
+ *         description: Transaction list
+ *       401:
+ *         description: Unauthorized
+ */
+router.get('/transactions', authMiddleware, subscriptionsController.getMyTransactions);
+
 module.exports = router;
