@@ -474,6 +474,23 @@ def run() -> None:
             if settings.request_delay_seconds > 0 and len(retry_symbols) > 0:
                 time.sleep(settings.request_delay_seconds)
 
+    # 6b. Market overview (KQGD) — cùng nhịp daily với market price khi bật MongoDB
+    market_overview_failed = False
+    if (
+        settings.enable_daily_market_overview
+        and settings.save_to_mongodb
+        and db_service.is_connected()
+    ):
+        try:
+            from vietstock_crawler.jobs.market_overview_daily import run_daily_market_overview
+
+            result = run_daily_market_overview(db_service)
+            if result and result.get("status") == "FAILED":
+                market_overview_failed = True
+        except Exception as exc:
+            market_overview_failed = True
+            logging.error("[MarketOverview] Job failed: %s", exc, exc_info=True)
+
     # 6. Ghi logs tổng hợp cuối cùng & chất lượng
     ended_at = datetime.utcnow()
     status_summary = "SUCCESS" if records_failed == 0 else "PARTIAL_SUCCESS"
@@ -482,8 +499,17 @@ def run() -> None:
     elif records_fetched == records_failed and records_fetched > 0:
         status_summary = "FAILED"
 
+    # Nếu crawl market overview bị lỗi thì set trạng thái tổng phù hợp là PARTIAL_SUCCESS
+    if market_overview_failed:
+        if status_summary == "SUCCESS":
+            status_summary = "PARTIAL_SUCCESS"
+            logging.info("[MarketOverview] Set overall job status to PARTIAL_SUCCESS due to market overview failure.")
+
     if settings.save_to_mongodb and db_service.is_connected() and log_id:
         error_msg = f"Skipped: {records_skipped} mã đã có dữ liệu" if records_skipped > 0 else ""
+        if market_overview_failed:
+            error_msg = (error_msg + "; " if error_msg else "") + "Market overview crawl failed"
+
         db_service.update_crawl_log(
             log_id=log_id,
             ended_at=ended_at,
@@ -504,19 +530,6 @@ def run() -> None:
             status=status_summary
         )
         logging.info("[MongoDB] Đã cập nhật xong CrawlLog và CrawlQuality.")
-
-    # 6b. Market overview (KQGD) — cùng nhịp daily với market price khi bật MongoDB
-    if (
-        settings.enable_daily_market_overview
-        and settings.save_to_mongodb
-        and db_service.is_connected()
-    ):
-        try:
-            from vietstock_crawler.jobs.market_overview_daily import run_daily_market_overview
-
-            run_daily_market_overview(db_service)
-        except Exception as exc:
-            logging.error("[MarketOverview] Job failed: %s", exc, exc_info=True)
 
     # 7. Lưu Google Sheets (nếu được bật)
     if settings.save_to_gsheet and spreadsheet:

@@ -579,50 +579,60 @@ class MongoDBService:
             logger.info(f"[MongoDB] Inserted financial report source for stock_id {stock_id} on {period_name}")
             return "INSERT"
     # ────────────────────────────────────────────────────────────
-    # Market Overview (collection: market_overviews)
+    # Market Overview (collection: factMarketOverviews)
     # ────────────────────────────────────────────────────────────
 
-    COLLECTION_MARKET_OVERVIEWS = "market_overviews"
+    COLLECTION_MARKET_OVERVIEWS = "factMarketOverviews"
 
     def ensure_market_overview_indexes(self) -> None:
-        """Create indexes for the market_overviews collection."""
+        """Create indexes for the factMarketOverviews collection."""
         if not self.is_connected():
             logger.warning("[MongoDB] Not connected. Cannot create market_overview indexes.")
             return
         col = self.db[self.COLLECTION_MARKET_OVERVIEWS]
-        col.create_index(
-            [("trading_date", 1), ("symbol", 1)],
-            unique=True,
-            name="idx_unique_trading_date_symbol",
-        )
-        col.create_index(
-            [("symbol", 1), ("trading_date", -1)],
-            name="idx_symbol_trading_date_desc",
-        )
-        col.create_index(
-            [("market", 1), ("trading_date", -1)],
-            name="idx_market_trading_date_desc",
-        )
+        try:
+            col.create_index(
+                [("market_id", 1), ("time_id", 1), ("symbol", 1)],
+                unique=True,
+                name="idx_unique_market_time_symbol",
+            )
+        except Exception as e:
+            logger.info(f"[MongoDB] Unique index creation skipped or conflicts: {e}")
+        try:
+            col.create_index(
+                [("symbol", 1), ("time_id", -1)],
+                name="idx_symbol_time_id_desc",
+            )
+        except Exception as e:
+            logger.info(f"[MongoDB] Index idx_symbol_time_id_desc skipped: {e}")
+        try:
+            col.create_index(
+                [("market", 1), ("time_id", -1)],
+                name="idx_market_time_id_desc",
+            )
+        except Exception as e:
+            logger.info(f"[MongoDB] Index idx_market_time_id_desc skipped: {e}")
         logger.info("[MongoDB] Market overview indexes ensured.")
 
     def upsert_market_overview(self, data: Dict[str, Any]) -> str:
         """
         Insert or update a single market overview record.
 
-        Uses (trading_date, symbol) as the unique filter.
+        Uses (market_id, time_id, symbol) as the unique filter.
         Returns 'INSERT', 'UPDATE', or 'FAILED'.
         """
         if not self.is_connected():
             logger.warning("[MongoDB] Not connected. Cannot upsert market overview.")
             return "FAILED"
 
-        trading_date = data.get("trading_date")
+        market_id = data.get("market_id")
+        time_id = data.get("time_id")
         symbol = data.get("symbol")
 
-        if not trading_date or not symbol:
+        if not market_id or not time_id or not symbol:
             logger.warning(
-                f"[MongoDB] upsert_market_overview: missing trading_date or symbol. "
-                f"trading_date={trading_date!r}, symbol={symbol!r}"
+                f"[MongoDB] upsert_market_overview: missing market_id, time_id or symbol. "
+                f"market_id={market_id!r}, time_id={time_id!r}, symbol={symbol!r}"
             )
             return "FAILED"
 
@@ -630,7 +640,8 @@ class MongoDBService:
         now = datetime.utcnow()
 
         doc: Dict[str, Any] = {
-            "trading_date": trading_date,
+            "market_id": market_id,
+            "time_id": time_id,
             "symbol": symbol,
             "display_symbol": data.get("display_symbol"),
             "market": data.get("market"),
@@ -655,7 +666,8 @@ class MongoDBService:
         }
 
         filter_query = {
-            "trading_date": trading_date,
+            "market_id": market_id,
+            "time_id": time_id,
             "symbol": symbol,
         }
 
@@ -664,13 +676,13 @@ class MongoDBService:
             doc.pop("created_at", None)  # preserve original created_at
             col.update_one(filter_query, {"$set": doc})
             logger.info(
-                f"[MongoDB] Updated market overview: {symbol} @ {trading_date}"
+                f"[MongoDB] Updated market overview: {symbol} @ {time_id}"
             )
             return "UPDATE"
         else:
             doc["created_at"] = now
             col.insert_one(doc)
             logger.info(
-                f"[MongoDB] Inserted market overview: {symbol} @ {trading_date}"
+                f"[MongoDB] Inserted market overview: {symbol} @ {time_id}"
             )
-            return "INSERT"
+            return "INSERT"
