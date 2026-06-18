@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "analyse"
-version = "0.1.0"
-description = "Python AI/LLM analysis scaffold for Vietnamese stock data."
+version = "0.2.0"
+description = "Python/FastAPI AI analysis service for Vietnamese stock reports with Gemini/OpenAI provider layer."
 requires-python = ">=3.11"
 authors = [{ name = "BE_AI_Stock_Trend_Prediction" }]
 dependencies = [

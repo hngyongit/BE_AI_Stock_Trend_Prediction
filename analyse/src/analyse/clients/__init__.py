@@ -1,1 +1,1 @@
-"""Client stubs cho backend API va OpenAI."""
+"""HTTP/backend clients."""

@@ -1,49 +1,37 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urljoin
 
-import httpx
-
+from analyse.clients.http_client import HttpClient
 from analyse.config.settings import Settings, get_settings
 
 
-class BackendAPIClient:
-    """Skeleton client de goi Node.js backend API hien co."""
+class BackendClient:
+    """Client gọi Node.js Backend API hiện có."""
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, http_client: HttpClient | None = None) -> None:
         self.settings = settings or get_settings()
-        self.base_url = self.settings.backend_api_url.rstrip("/")
-        self.token = self.settings.backend_api_token
+        self.base_url = self.settings.backend_api_base_url.rstrip("/")
+        self.http_client = http_client or HttpClient(timeout_ms=self.settings.backend_api_timeout_ms)
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+        if self.settings.backend_api_token:
+            headers["Authorization"] = f"Bearer {self.settings.backend_api_token}"
         return headers
 
+    def _url(self, path: str) -> str:
+        return urljoin(self.base_url + "/", path.lstrip("/"))
+
+    async def get_watchlists(self) -> dict[str, Any]:
+        path = self.settings.backend_watchlist_endpoint
+        return await self.http_client.get_json(self._url(path), headers=self._headers())
+
     async def get_stock_detail(self, symbol: str) -> dict[str, Any]:
-        """TODO: Goi GET /api/stocks/:symbol de lay stock va latest_price."""
-        raise NotImplementedError("Chua trien khai logic goi backend API cho stock detail.")
+        path = self.settings.backend_stock_detail_endpoint.format(symbol=symbol.upper())
+        return await self.http_client.get_json(self._url(path), headers=self._headers())
 
-    async def get_stock_chart(self, symbol: str, range_value: str = "1m") -> list[dict[str, Any]]:
-        """TODO: Goi GET /api/stocks/:symbol/chart?range=... de lay OHLCV."""
-        raise NotImplementedError("Chua trien khai logic goi backend API cho stock chart.")
-
-    async def get_watchlist(self) -> dict[str, Any]:
-        """TODO: Goi GET /api/watchlists. Endpoint nay can Bearer token cua user."""
-        raise NotImplementedError("Chua trien khai logic goi backend API cho watchlist.")
-
-    async def get_user_dashboard(self) -> dict[str, Any]:
-        """TODO: Goi GET /api/dashboard/user neu can market_leaders va market_overview."""
-        raise NotImplementedError("Chua trien khai logic goi backend API cho user dashboard.")
-
-    async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Ham dung chung cho giai doan sau; hien chua duoc route nao su dung."""
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                f"{self.base_url}{path}",
-                params=params,
-                headers=self._headers(),
-            )
-            response.raise_for_status()
-            return response.json()
+    async def get_stock_chart(self, symbol: str, range_value: str = "1m") -> dict[str, Any]:
+        path = self.settings.backend_stock_chart_endpoint.format(symbol=symbol.upper(), range=range_value)
+        return await self.http_client.get_json(self._url(path), headers=self._headers())

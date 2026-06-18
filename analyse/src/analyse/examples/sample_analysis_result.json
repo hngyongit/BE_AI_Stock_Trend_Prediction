@@ -1,35 +1,33 @@
 {
-  "success": true,
+  "code": 200,
+  "message": "Tạo dữ liệu report thành công",
   "data": {
-    "symbol": "VCB",
-    "summary": "Đây là ví dụ kết quả placeholder bằng tiếng Việt. Phân tích LLM chưa được triển khai.",
-    "dataQuality": {
-      "level": "MEDIUM",
-      "missingFields": [],
-      "notes": [
-        "Cần đối chiếu thêm dữ liệu tài chính và chất lượng crawl trước khi đưa ra nhận định."
-      ]
+    "report_id": "FPT_HOSE_20260618_103000",
+    "generated_at": "2026-06-18T10:30:00+07:00",
+    "symbol": "FPT",
+    "company": "FPT Corp",
+    "scope_exchange": "HOSE",
+    "language": "vi",
+    "summary_schema_version": "1.0",
+    "provider": {
+      "name": "openai",
+      "model": "openai-model-configurable",
+      "status": "not_implemented",
+      "latency_ms": 0
     },
-    "trend": {
-      "direction": "UNCLEAR",
-      "confidence": 0.0,
-      "reasoning": [
-        "Skeleton chưa thực hiện tính toán xu hướng."
-      ]
+    "data_sources": [],
+    "summary": {},
+    "markdown_report": {
+      "available": true,
+      "output_path": "reports/FPT_HOSE_20260618_103000.md",
+      "content": "# Báo cáo phân tích cổ phiếu FPT"
     },
-    "strengths": [],
-    "risks": [],
-    "signals": [],
-    "actionPlan": {
-      "shortTerm": [],
-      "mediumTerm": [],
-      "watchPoints": [
-        "Theo dõi giá đóng cửa, thanh khoản và biến động VNINDEX."
-      ],
-      "riskManagement": [
-        "Không dùng kết quả placeholder để ra quyết định giao dịch."
-      ]
+    "html_report": {
+      "available": true,
+      "output_path": "reports/FPT_HOSE_20260618_103000.html",
+      "content": null,
+      "template_name": "src/analyse/services/html_service.py::build_metadata"
     },
-    "disclaimer": "Nội dung chỉ mang tính tham khảo, không phải khuyến nghị mua bán."
+    "warnings": ["Đây là response mẫu cho skeleton."]
   }
 }
