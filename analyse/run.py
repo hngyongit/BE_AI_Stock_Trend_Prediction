@@ -15,14 +15,14 @@ from analyse.config.settings import get_settings
 
 
 def main() -> None:
-    """Chay service FastAPI skeleton cho tang phan tich AI/LLM."""
+    """Chạy FastAPI analyse service."""
     load_dotenv(ROOT / ".env")
     settings = get_settings()
     uvicorn.run(
         "analyse.main:app",
         host=settings.analyse_host,
         port=settings.analyse_port,
-        reload=settings.node_env == "development",
+        reload=settings.analyse_env == "development",
     )
 
 

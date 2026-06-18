@@ -2,32 +2,33 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from analyse.api.routes import router as analyse_router
+from analyse.api.routes import router
 from analyse.config.settings import get_settings
-from analyse.utils.response_utils import success_response
+from analyse.schemas.common import api_success
 
 
 def create_app() -> FastAPI:
-    """Khoi tao FastAPI app doc lap cho analyse service."""
+    """Khởi tạo FastAPI app độc lập cho analyse service."""
     settings = get_settings()
     app = FastAPI(
         title="Analyse Service",
-        description="Skeleton Python cho tang phan tich chung khoan Viet Nam bang AI/LLM.",
-        version="0.1.0",
+        description="Service Python/FastAPI phân tích cổ phiếu Việt Nam bằng AI/LLM, hỗ trợ Gemini và OpenAI.",
+        version="0.2.0",
         docs_url="/api/analyse/docs",
         redoc_url="/api/analyse/redoc",
     )
 
     @app.get("/")
     async def root() -> dict:
-        return success_response(
-            "Analyse service đã sẵn sàng. Logic phân tích AI/LLM sẽ được triển khai ở bước tiếp theo.",
+        return api_success(
+            "Analyse service đã sẵn sàng.",
             data={
                 "service": "analyse",
                 "port": settings.analyse_port,
-                "baseRoute": "/api/analyse",
+                "docs": "/api/analyse/docs",
+                "target_endpoint": "/api/ai-reports/analyse-one",
             },
         )
 
-    app.include_router(analyse_router)
+    app.include_router(router)
     return app

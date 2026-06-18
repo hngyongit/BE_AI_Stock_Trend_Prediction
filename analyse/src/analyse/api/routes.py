@@ -1,32 +1,37 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from analyse.api import controllers
-from analyse.schemas.stock_schema import StockAnalysisRequest, StockFetchAnalysisRequest
-from analyse.schemas.watchlist_schema import WatchlistAnalysisRequest
+from analyse.api.dependencies import get_report_service
+from analyse.schemas.common import api_success
+from analyse.schemas.report import AnalyseOneReportRequest
+from analyse.schemas.stock import StockAnalysisRequest, StockFetchAnalysisRequest
+from analyse.schemas.watchlist import WatchlistAnalysisRequest
+from analyse.services.report_service import ReportService
 
-router = APIRouter(prefix="/api/analyse", tags=["analyse"])
+router = APIRouter(tags=["analyse"])
 
 
-@router.get("/health")
+@router.get("/api/analyse/health")
 async def health() -> dict:
-    return await controllers.health_controller()
+    return api_success("Analyse service đã sẵn sàng.")
 
 
-@router.post("/stock")
-async def analyse_stock(payload: StockAnalysisRequest) -> dict:
-    # TODO: Sau nay route nay se nhan du lieu truc tiep tu client va goi LLM.
-    return await controllers.stock_analysis_controller(payload)
+@router.post("/api/analyse/stock")
+async def analyse_stock(payload: StockAnalysisRequest, service: ReportService = Depends(get_report_service)) -> dict:
+    return service.build_direct_stock_placeholder(payload)
 
 
-@router.post("/watchlist")
-async def analyse_watchlist(payload: WatchlistAnalysisRequest) -> dict:
-    # TODO: Sau nay route nay se tong hop danh sach theo doi va goi LLM.
-    return await controllers.watchlist_analysis_controller(payload)
+@router.post("/api/analyse/watchlist")
+async def analyse_watchlist(payload: WatchlistAnalysisRequest, service: ReportService = Depends(get_report_service)) -> dict:
+    return service.build_watchlist_placeholder(payload)
 
 
-@router.post("/fetch-and-analyse/stock")
-async def fetch_and_analyse_stock(payload: StockFetchAnalysisRequest) -> dict:
-    # TODO: Sau nay route nay se goi backend API roi moi chuan hoa va phan tich.
-    return await controllers.fetch_and_analyse_stock_controller(payload)
+@router.post("/api/analyse/fetch-and-analyse/stock")
+async def fetch_and_analyse_stock(payload: StockFetchAnalysisRequest, service: ReportService = Depends(get_report_service)) -> dict:
+    return await service.fetch_and_analyse_stock_placeholder(payload)
+
+
+@router.post("/api/ai-reports/analyse-one")
+async def analyse_one_report(payload: AnalyseOneReportRequest, service: ReportService = Depends(get_report_service)) -> dict:
+    return await service.analyse_one_report(payload)

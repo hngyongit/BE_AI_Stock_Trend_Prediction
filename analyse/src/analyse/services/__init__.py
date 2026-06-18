@@ -1,1 +1,1 @@
-"""Service stubs cho workflow phan tich AI/LLM."""
+"""Business services for analyse workflow."""

@@ -1,1 +1,1 @@
-"""Tests placeholder cho analyse service."""
+"""Tests for analyse service."""
