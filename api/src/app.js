@@ -19,8 +19,10 @@ const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('./config/swagger.config');
 
 const app = express();
+app.set('etag', false);
 
 configurePassport();
+
 
 // Set security HTTP headers (disable Content Security Policy to allow Swagger UI inline assets)
 app.use(helmet({
@@ -57,6 +59,13 @@ app.use('/api/subscriptions/webhook', express.raw({ type: 'application/json', li
 // Parse JSON and urlencoded request bodies
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Disable caching for API routes to prevent 304 Not Modified status codes
+app.use((req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  next();
+});
+
 
 // Swagger API Documentation
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
