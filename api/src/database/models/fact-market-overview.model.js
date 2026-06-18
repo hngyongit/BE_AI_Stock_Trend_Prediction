@@ -11,7 +11,34 @@ const FactMarketOverviewSchema = new mongoose.Schema(
       type: Number,
       required: true
     },
-
+    symbol: {
+      type: String,
+      required: true
+    },
+    display_symbol: {
+      type: String
+    },
+    reference_index: {
+      type: Number
+    },
+    open_index: {
+      type: Number
+    },
+    close_index: {
+      type: Number
+    },
+    high_index: {
+      type: Number
+    },
+    low_index: {
+      type: Number
+    },
+    change_value: {
+      type: Number
+    },
+    change_percent: {
+      type: Number
+    },
     total_volume: {
       type: Number
     },
@@ -50,6 +77,12 @@ const FactMarketOverviewSchema = new mongoose.Schema(
     },
     ask_volume: {
       type: Number
+    },
+    last_trading_time: {
+      type: Date
+    },
+    source: {
+      type: String
     }
   },
   {
@@ -61,6 +94,7 @@ const FactMarketOverviewSchema = new mongoose.Schema(
   }
 );
 
-FactMarketOverviewSchema.index({ market_id: 1, time_id: 1 }, { unique: true });
+FactMarketOverviewSchema.index({ market_id: 1, time_id: 1, symbol: 1 }, { unique: true });
 
 module.exports = mongoose.model('FactMarketOverview', FactMarketOverviewSchema);
+

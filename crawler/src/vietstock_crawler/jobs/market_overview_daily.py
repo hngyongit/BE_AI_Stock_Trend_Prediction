@@ -20,7 +20,7 @@ def _load_playwright_crawler_module() -> Any:
     """Load `crawler/scripts/market_overview_crawler.py` (not installed as a package)."""
     # this file: src/vietstock_crawler/jobs/market_overview_daily.py -> parents[3] = crawler/
     crawler_root = Path(__file__).resolve().parents[3]
-    path = crawler_root / "scripts" / "market_overview_crawler.py"
+    path = crawler_root / "market_overview_crawler.py"
     if not path.is_file():
         raise FileNotFoundError(f"market_overview_crawler not found: {path}")
     spec = importlib.util.spec_from_file_location("market_overview_crawler", path)
@@ -33,7 +33,7 @@ def _load_playwright_crawler_module() -> Any:
 
 def run_daily_market_overview(db_service: MongoDBService) -> None:
     """
-    Crawl one KQGD overview row (latest session) and upsert into `market_overviews`.
+    Crawl one KQGD overview row (latest session) and upsert into `fact_market_overview`.
 
     No-op if MongoDB is not connected.
     """
@@ -41,30 +41,15 @@ def run_daily_market_overview(db_service: MongoDBService) -> None:
         logger.info("[MarketOverview] MongoDB not connected — skip daily market overview.")
         return
 
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    target_date = datetime.now(ZoneInfo("Asia/Ho_Chi_Minh")).date().isoformat()
+
     mod = _load_playwright_crawler_module()
-    crawl = getattr(mod, "crawl_market_overview")
-    fallback = getattr(mod, "crawl_with_manual_post")
+    run_crawl = getattr(mod, "run_market_overview_crawl")
 
-    logger.info("[MarketOverview] Starting daily KQGD overview crawl…")
-    raw: Optional[dict[str, Any]] = crawl()
-    if not raw:
-        logger.warning("[MarketOverview] Primary crawl failed, trying manual POST fallback…")
-        raw = fallback()
+    logger.info(f"[MarketOverview] Starting daily KQGD overview crawl for {target_date}…")
+    result = run_crawl(target_date=target_date, dry_run=False, force=False)
+    logger.info(f"[MarketOverview] Daily crawl completed with result: {result}")
+    return result
 
-    if not raw:
-        logger.error("[MarketOverview] Crawl failed — no data to persist.")
-        return
-
-    record = normalize_kqgd_playwright_row(raw)
-    if not record:
-        logger.error("[MarketOverview] Normalization failed — skip upsert.")
-        return
-
-    db_service.ensure_market_overview_indexes()
-    outcome = db_service.upsert_market_overview(record)
-    logger.info(
-        "[MarketOverview] Upsert finished: symbol=%s trading_date=%s outcome=%s",
-        record.get("symbol"),
-        record.get("trading_date"),
-        outcome,
-    )

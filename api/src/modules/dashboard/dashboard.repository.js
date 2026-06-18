@@ -235,38 +235,39 @@ const findAdminStats = async () => {
  * Fetch the latest market overview statistics, including a 30-day chart history.
  */
 const findLatestMarketOverview = async () => {
-  const mongoose = require('mongoose');
-  const db = mongoose.connection.db;
-  if (!db) {
-    return [];
-  }
-
   // Get all unique index symbols (e.g. 'VNINDEX')
-  const symbols = await db.collection('market_overviews').distinct('symbol');
+  const symbols = await FactMarketOverview.distinct('symbol');
   const results = [];
 
   for (const symbol of symbols) {
-    const latestRecord = await db.collection('market_overviews')
-      .findOne({ symbol }, { sort: { trading_date: -1 } });
+    const latestRecord = await FactMarketOverview.findOne({ symbol })
+      .sort({ time_id: -1 })
+      .lean();
 
     if (!latestRecord) continue;
 
     // Fetch last 30 historical records
-    const history = await db.collection('market_overviews')
-      .find({ symbol })
-      .sort({ trading_date: -1 })
+    const history = await FactMarketOverview.find({ symbol })
+      .sort({ time_id: -1 })
       .limit(30)
-      .toArray();
+      .lean();
 
     // Reverse history to ascending (chronological) order for chart plotting
-    const chartData = history.reverse().map(h => ({
-      date: h.trading_date instanceof Date ? h.trading_date.toISOString().split('T')[0] : String(h.trading_date),
-      close: h.close_index,
-      open: h.open_index,
-      high: h.high_index,
-      low: h.low_index,
-      volume: h.total_volume || 0
-    }));
+    const chartData = history.reverse().map(h => {
+      const timeStr = String(h.time_id);
+      const dateStr = `${timeStr.slice(0, 4)}-${timeStr.slice(4, 6)}-${timeStr.slice(6, 8)}`;
+      return {
+        date: dateStr,
+        close: h.close_index,
+        open: h.open_index,
+        high: h.high_index,
+        low: h.low_index,
+        volume: h.total_volume || 0
+      };
+    });
+
+    const timeStr = String(latestRecord.time_id);
+    const dateStr = `${timeStr.slice(0, 4)}-${timeStr.slice(4, 6)}-${timeStr.slice(6, 8)}`;
 
     results.push({
       symbol: latestRecord.symbol,
@@ -279,7 +280,7 @@ const findLatestMarketOverview = async () => {
       change_value: latestRecord.change_value || 0,
       change_percent: latestRecord.change_percent || 0,
       total_volume: latestRecord.total_volume || 0,
-      trading_date: latestRecord.trading_date instanceof Date ? latestRecord.trading_date.toISOString().split('T')[0] : String(latestRecord.trading_date),
+      trading_date: dateStr,
       chart: chartData
     });
   }

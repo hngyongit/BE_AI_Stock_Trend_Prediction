@@ -363,7 +363,11 @@ def normalize_kqgd_playwright_row(raw: Dict[str, Any]) -> Optional[Dict[str, Any
         return None
 
     record = empty_market_overview_record()
-    record["trading_date"] = str(td).strip()[:10]
+    try:
+        from datetime import datetime
+        record["trading_date"] = datetime.strptime(str(td).strip()[:10], "%Y-%m-%d")
+    except Exception:
+        record["trading_date"] = str(td).strip()[:10]
     record["display_symbol"] = str(raw.get("stock_name") or stock_code).strip()
     record["symbol"] = normalize_market_symbol(stock_code)
     if not record["symbol"]:
