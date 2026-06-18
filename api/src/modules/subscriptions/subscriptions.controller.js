@@ -82,8 +82,22 @@ const getStatus = async (req, res, next) => {
     }
 };
 
+/**
+ * Get transaction history for current user
+ */
+const getMyTransactions = async (req, res, next) => {
+    try {
+        const userId = req.user._id || req.user.id;
+        const result = await subscriptionsService.getMyTransactions(userId, req.query);
+        return success(res, 'Get my transactions successfully', result);
+    } catch (error) {
+        next(error);
+    }
+};
+
 module.exports = {
     createPayment,
     handleWebhook,
-    getStatus
+    getStatus,
+    getMyTransactions
 };

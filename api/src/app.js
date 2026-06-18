@@ -13,6 +13,8 @@ const { stocksRouter, adminStocksRouter } = require('./modules/stocks/stocks.rou
 const watchlistsRouter = require('./modules/watchlists/watchlists.routes');
 const { dashboardRouter } = require('./modules/dashboard/dashboard.routes');
 const subscriptionsRouter = require('./modules/subscriptions/subscriptions.routes');
+const adminSubscriptionsRouter = require('./modules/admin-subscriptions/admin-subscriptions.routes');
+const staffSubscriptionsRouter = require('./modules/staff-subscriptions/staff-subscriptions.routes');
 const { error } = require('./common/utils/response.util');
 
 const swaggerUi = require('swagger-ui-express');
@@ -79,6 +81,8 @@ app.use('/api/admin/stocks', adminStocksRouter);
 app.use('/api/watchlists', watchlistsRouter);
 app.use('/api/dashboard', dashboardRouter);
 app.use('/api/subscriptions', subscriptionsRouter);
+app.use('/api/admin/subscriptions', adminSubscriptionsRouter);
+app.use('/api/staff/subscriptions', staffSubscriptionsRouter);
 
 // Health check endpoint
 app.get('/', (req, res) => {
