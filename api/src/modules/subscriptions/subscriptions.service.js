@@ -24,8 +24,10 @@ const createPayment = async (userId) => {
         throw error;
     }
 
-    // Generate unique order code
-    const orderCode = parseInt(`${Date.now()}${userId.toString().slice(-4)}`, 10);
+    // Generate unique order code: seconds timestamp + userId hash + random (stays within MAX_SAFE_INTEGER)
+    // Use last 6 digits of userId to avoid overflow while maintaining uniqueness
+    const userIdHash = parseInt(userId.toString().slice(-6), 10) || 0;
+    const orderCode = Math.floor(Date.now() / 1000) * 1000000 + userIdHash * 100 + Math.floor(Math.random() * 100);
 
     // Build items array (required by PayOS)
     const items = [
