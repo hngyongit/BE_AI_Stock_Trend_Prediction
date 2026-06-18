@@ -65,10 +65,11 @@ const findMarketLeaders = async () => {
     return { gainers: [], losers: [] };
   }
 
-  const query = { time_id: latestTimeId, price_change_percent: { $ne: null } };
+  const gainersQuery = { time_id: latestTimeId, price_change_percent: { $gt: 0 } };
+  const losersQuery = { time_id: latestTimeId, price_change_percent: { $lt: 0 } };
 
   const [gainers, losers] = await Promise.all([
-    FactMarketPrice.find(query)
+    FactMarketPrice.find(gainersQuery)
       .sort({ price_change_percent: -1 })
       .limit(5)
       .populate({
@@ -76,7 +77,7 @@ const findMarketLeaders = async () => {
         select: 'symbol company_name'
       })
       .lean(),
-    FactMarketPrice.find(query)
+    FactMarketPrice.find(losersQuery)
       .sort({ price_change_percent: 1 })
       .limit(5)
       .populate({
@@ -85,6 +86,8 @@ const findMarketLeaders = async () => {
       })
       .lean()
   ]);
+
+
 
   const mapLeader = (p) => ({
     symbol: p.stock_id ? p.stock_id.symbol : 'UNKNOWN',
