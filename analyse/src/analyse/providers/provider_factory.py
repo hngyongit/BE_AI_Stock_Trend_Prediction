@@ -9,8 +9,11 @@ from analyse.schemas.common import ProviderName
 
 def get_llm_provider(provider: ProviderName, settings: Settings | None = None) -> BaseLLMProvider:
     settings = settings or get_settings()
-    if provider == "gemini":
+    provider_value = str(provider).strip().lower()
+
+    if provider_value == "gemini":
         return GeminiProvider(settings)
-    if provider == "openai":
+    if provider_value == "openai":
         return OpenAIProvider(settings)
-    raise ValueError(f"Unsupported provider: {provider}")
+
+    raise ValueError(f"Unsupported provider: {provider_value}")

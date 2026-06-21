@@ -16,6 +16,7 @@ dependencies = [
     "python-dotenv",
     "httpx",
     "openai",
+    "google-genai",
 ]
 
 [tool.setuptools.packages.find]

@@ -1,0 +1,138 @@
+# ==============================================================================
+# 1. CẤU HÌNH HỆ THỐNG & MÁY CHỦ (SYSTEM & SERVER SETTINGS)
+# ==============================================================================
+# Môi trường chạy ứng dụng: development (phát triển/thử nghiệm), giúp hiển thị nhiều log lỗi hơn
+ANALYSE_ENV=development
+# IP lắng nghe: 0.0.0.0 cho phép mọi thiết bị trong mạng nội bộ (LAN) truy cập vào server này
+ANALYSE_HOST=0.0.0.0
+# Cổng (Port) chạy ứng dụng (Truy cập qua http://localhost:5100)
+ANALYSE_PORT=5100
+# Mức độ ghi log: INFO (chỉ ghi nhận các thông tin cơ bản, cảnh báo và lỗi hệ thống)
+ANALYSE_LOG_LEVEL=INFO
+# Múi giờ hoạt động mặc định của hệ thống (Giờ Việt Nam)
+ANALYSE_TIMEZONE=Asia/Ho_Chi_Minh
+# Khai báo thư mục gốc chứa mã nguồn là 'src' để Python hiểu khi dùng lệnh import
+PYTHONPATH=src
+
+# ==============================================================================
+# 2. KẾT NỐI ĐẾN BACKEND API (BACKEND INTEGRATION)
+# ==============================================================================
+# Đường dẫn gốc (Base URL) của API Backend tổng (đang chạy ở port 5000)
+BACKEND_API_BASE_URL=http://localhost:5000
+# Thời gian tối đa chờ phản hồi từ Backend trước khi ngắt kết nối (30,000 ms = 30 giây)
+BACKEND_API_TIMEOUT_MS=30000
+# Mã Token để chứng thực quyền truy cập khi gọi sang Backend (hiện đang để trống)
+BACKEND_API_TOKEN=
+# Endpoint (đường dẫn phụ) để lấy danh sách cổ phiếu cần theo dõi (Watchlist)
+BACKEND_WATCHLIST_ENDPOINT=/api/watchlists
+# Endpoint lấy thông tin chi tiết một mã cổ phiếu cụ thể (biến {symbol} sẽ thay bằng SSI, VCB...)
+BACKEND_STOCK_DETAIL_ENDPOINT=/api/stocks/{symbol}
+# Endpoint lấy dữ liệu nến/giá để vẽ biểu đồ kỹ thuật theo khoảng thời gian {range}
+BACKEND_STOCK_CHART_ENDPOINT=/api/stocks/{symbol}/chart?range={range}
+
+# ==============================================================================
+# 3. QUẢN LÝ BÁO CÁO & GIỚI HẠN DỰ ÁN (REPORT & LIMITATION)
+# ==============================================================================
+# Tên thư mục đầu ra chứa các file báo cáo phân tích được xuất ra
+REPORT_OUTPUT_DIR=reports
+# Ngôn ngữ hiển thị trong file báo cáo kết quả: vi (Tiếng Việt)
+REPORT_LANGUAGE=vi
+# Phiên bản cấu trúc dữ liệu (schema) của file tóm tắt đầu ra
+SUMMARY_SCHEMA_VERSION=1.0
+# Số lượng mã cổ phiếu tối đa một người dùng được phép thêm vào danh mục theo dõi
+MAX_WATCHLIST_SYMBOLS=5
+# Chế độ phân tích: true nghĩa là hệ thống sẽ chỉ xử lý đơn lẻ từng mã một tại một thời điểm
+ANALYSE_ONE_SYMBOL_ONLY=true
+
+# ==============================================================================
+# 4. THU THẬP TIN TỨC & THỊ TRƯỜNG (CRAWLER & RESEARCH SETTINGS)
+# ==============================================================================
+# Bật/Tắt tính năng tìm kiếm và thu thập thông tin bổ trợ từ Internet (true = Bật)
+ENABLE_EXTERNAL_RESEARCH=true
+# Cho phép hệ thống cào dữ liệu tin tức/sự kiện từ trang Vietstock
+ENABLE_VIETSTOCK=true
+# Cho phép hệ thống cào dữ liệu bài viết từ trang CafeF
+ENABLE_CAFEF=true
+# Cho phép lấy tin tức tự động liên quan đến cổ phiếu qua RSS của Google News
+ENABLE_GOOGLE_NEWS_RSS=true
+# Thư mục lưu trữ tạm thời (cache) tin tức đã tải về để tăng tốc cho lần chạy sau
+RESEARCH_CACHE_DIR=.research_cache
+# Thời gian sống của cache: 21600 giây (= 6 tiếng). Quá 6 tiếng hệ thống sẽ tải tin mới
+RESEARCH_CACHE_TTL_SECONDS=21600
+# Thời gian chờ tối đa khi cào tin tức từ một trang web (20,000 ms = 20 giây)
+RESEARCH_TIMEOUT_MS=20000
+# Số lượng bài báo, tin tức tối đa được thu thập cho mỗi mã cổ phiếu để đưa vào AI
+MAX_RESEARCH_ITEMS=10
+
+# ==============================================================================
+# 5. QUẢN LÝ VỐN & RỦI RO MẶC ĐỊNH (RISK MANAGEMENT)
+# ==============================================================================
+# Số vốn mặc định giả định để tính toán toán học phân bổ dòng tiền (100.000.000 VNĐ)
+DEFAULT_CAPITAL_VND=100000000
+# Tỷ lệ rủi ro tối đa chấp nhận mất trên tổng vốn cho 1 lệnh (1.0% -> dùng tính Stop Loss)
+DEFAULT_RISK_PER_TRADE_PCT=1.0
+# Tỷ trọng vốn tối đa được phép mua cho duy nhất 1 mã cổ phiếu (Không quá 12% danh mục)
+DEFAULT_MAX_POSITION_PCT=12.0
+
+# ==============================================================================
+# 6. TÍCH HỢP TRÍ TUỆ NHÂN TẠO GOOGLE GEMINI AI
+# ==============================================================================
+# Bật/Tắt tính năng phân tích xu hướng bằng AI của Google (true = Bật)
+GEMINI_ENABLED=true
+# KHÓA BẢO MẬT API: Điền API Key do Google cấp vào đây thì AI mới chạy được
+GEMINI_API_KEY=
+# Phiên bản mô hình AI sử dụng: gemini-2.5-flash (tốc độ nhanh, phản hồi tối ưu)
+GEMINI_MODEL=gemini-2.5-flash
+# Độ sáng tạo của AI: 0.2 (thấp) giúp AI trả lời thực tế, bám sát số liệu, ít "ảo tưởng"
+GEMINI_TEMPERATURE=0.2
+# Thuật toán chọn từ ngữ dựa trên xác suất tích lũy (0.9 là mức tiêu chuẩn)
+GEMINI_TOP_P=0.9
+# Số lượng tối đa các token đầu ra (độ dài tối đa của văn bản phản hồi từ AI)
+GEMINI_MAX_OUTPUT_TOKENS=8192
+# Thời gian tối đa chờ AI xử lý dữ liệu trước khi báo lỗi Timeout (60,000 ms = 60 giây)
+GEMINI_TIMEOUT_MS=60000
+# Ép AI bắt buộc phải trả kết quả dạng JSON để lập trình viên dễ bóc tách đưa lên UI
+GEMINI_JSON_MODE=true
+
+
+ANALYSE_ENV=development
+ANALYSE_HOST=0.0.0.0
+ANALYSE_PORT=5100
+ANALYSE_LOG_LEVEL=INFO
+ANALYSE_TIMEZONE=Asia/Ho_Chi_Minh
+PYTHONPATH=src
+
+BACKEND_API_BASE_URL=http://localhost:5000
+BACKEND_API_TIMEOUT_MS=30000
+BACKEND_API_TOKEN=
+BACKEND_WATCHLIST_ENDPOINT=/api/watchlists
+BACKEND_STOCK_DETAIL_ENDPOINT=/api/stocks/{symbol}
+BACKEND_STOCK_CHART_ENDPOINT=/api/stocks/{symbol}/chart?range={range}
+
+REPORT_OUTPUT_DIR=reports
+REPORT_LANGUAGE=vi
+SUMMARY_SCHEMA_VERSION=1.0
+MAX_WATCHLIST_SYMBOLS=5
+ANALYSE_ONE_SYMBOL_ONLY=true
+
+ENABLE_EXTERNAL_RESEARCH=true
+ENABLE_VIETSTOCK=true
+ENABLE_CAFEF=true
+ENABLE_GOOGLE_NEWS_RSS=true
+RESEARCH_CACHE_DIR=.research_cache
+RESEARCH_CACHE_TTL_SECONDS=21600
+RESEARCH_TIMEOUT_MS=20000
+MAX_RESEARCH_ITEMS=10
+
+DEFAULT_CAPITAL_VND=100000000
+DEFAULT_RISK_PER_TRADE_PCT=1.0
+DEFAULT_MAX_POSITION_PCT=12.0
+
+GEMINI_ENABLED=true
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-2.5-flash
+GEMINI_TEMPERATURE=0.2
+GEMINI_TOP_P=0.9
+GEMINI_MAX_OUTPUT_TOKENS=8192
+GEMINI_TIMEOUT_MS=60000
+GEMINI_JSON_MODE=true
