@@ -9,6 +9,7 @@ const {
   validate,
   getStocksValidation,
   getChartValidation,
+  getAnalysisDataValidation,
   createStockValidation,
   updateStockValidation
 } = require('./stocks.validation');
@@ -107,6 +108,54 @@ const {
  *                           example: 1
  */
 router.get('/', getStocksValidation, validate, stocksController.getStocks);
+
+/**
+ * @openapi
+ * /api/stocks/{symbol}/analysis-data:
+ *   get:
+ *     summary: Retrieve normalized stock analysis payload for analyse service
+ *     description: Retrieve latest market data, chart history, financial statements, market context, peers, and data-quality diagnostics in a stable contract for the Python analyse service.
+ *     tags: [Stocks]
+ *     parameters:
+ *       - in: path
+ *         name: symbol
+ *         required: true
+ *         schema:
+ *           type: string
+ *           example: FPT
+ *       - in: query
+ *         name: exchange
+ *         schema:
+ *           type: string
+ *           example: HOSE
+ *       - in: query
+ *         name: quarters
+ *         schema:
+ *           type: integer
+ *           default: 6
+ *       - in: query
+ *         name: chartRange
+ *         schema:
+ *           type: string
+ *           enum: [7d, 1m, 3m, 6m, 1y, all]
+ *           default: 3m
+ *       - in: query
+ *         name: includePeers
+ *         schema:
+ *           type: boolean
+ *           default: true
+ *       - in: query
+ *         name: includeMarketContext
+ *         schema:
+ *           type: boolean
+ *           default: true
+ *     responses:
+ *       200:
+ *         description: Analysis payload retrieved successfully.
+ *       404:
+ *         description: Stock symbol not found.
+ */
+router.get('/:symbol/analysis-data', getAnalysisDataValidation, validate, stocksController.getStockAnalysisData);
 
 /**
  * @openapi

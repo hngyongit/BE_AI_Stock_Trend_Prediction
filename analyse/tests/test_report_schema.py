@@ -34,6 +34,23 @@ def test_analyse_one_request_accepts_provider_model_and_aliases():
     assert request.options.max_position_pct == 12.0
 
 
+def test_analyse_one_request_maps_render_html_alias_true():
+    request = AnalyseOneReportRequest.model_validate(
+        {
+            "symbol": "FPT",
+            "scopeExchange": "HOSE",
+            "options": {
+                "renderMarkdown": True,
+                "renderHtml": True,
+            },
+        }
+    )
+
+    assert request.scope_exchange == "HOSE"
+    assert request.options.render_markdown is True
+    assert request.options.render_html is True
+
+
 def test_analyse_one_request_allows_default_provider_from_settings_layer():
     request = AnalyseOneReportRequest.model_validate({"symbol": "FPT", "scopeExchange": "HOSE"})
     assert request.provider is None

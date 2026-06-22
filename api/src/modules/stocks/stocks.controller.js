@@ -32,6 +32,27 @@ const getStockChart = async (req, res, next) => {
   }
 };
 
+const getStockAnalysisData = async (req, res, next) => {
+  try {
+    const { symbol } = req.params;
+    const {
+      quarters,
+      chartRange,
+      includePeers,
+      includeMarketContext
+    } = req.query;
+    const result = await stocksService.getStockAnalysisData(symbol, {
+      quarters,
+      chartRange,
+      includePeers,
+      includeMarketContext
+    });
+    return success(res, 'Get stock analysis data successfully', result);
+  } catch (error) {
+    next(error);
+  }
+};
+
 const createStockMaster = async (req, res, next) => {
   try {
     const result = await stocksService.createStockMaster(req.body);
@@ -55,6 +76,7 @@ module.exports = {
   getStocks,
   getStockDetail,
   getStockChart,
+  getStockAnalysisData,
   createStockMaster,
   updateStockMaster
 };
