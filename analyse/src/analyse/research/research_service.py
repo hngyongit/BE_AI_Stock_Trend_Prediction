@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import re
 
 from analyse.config.settings import Settings, get_settings
 from analyse.research.cafef import CafeFResearchAdapter
@@ -78,8 +79,7 @@ class ExternalResearchService:
         result: list[ResearchItem] = []
         seen: set[str] = set()
         for item in items:
-            key = item.url or item.title or ""
-            key = key.strip().lower()
+            key = self._dedupe_key(item)
             if not key or key in seen:
                 continue
             result.append(item)
@@ -89,11 +89,17 @@ class ExternalResearchService:
     def _sort_and_limit(self, items: list[ResearchItem]) -> list[ResearchItem]:
         return sorted(items, key=self._sort_key, reverse=True)[: self.settings.max_research_items]
 
-    def _sort_key(self, item: ResearchItem) -> tuple[float, int, datetime]:
+    def _sort_key(self, item: ResearchItem) -> tuple[datetime, float, int]:
         relevance = item.relevance_score or 0.0
         priority = self._source_priority_score(item)
         published = parse_datetime_for_sort(item.published_at) or datetime.min
-        return (relevance, priority, published.replace(tzinfo=None))
+        return (published.replace(tzinfo=None), relevance, priority)
+
+    def _dedupe_key(self, item: ResearchItem) -> str:
+        title_key = re.sub(r"\W+", " ", (item.title or "").lower()).strip()
+        if title_key:
+            return title_key
+        return (item.url or "").strip().lower()
 
     def _source_priority_score(self, item: ResearchItem) -> int:
         url_domain = normalize_domain(item.url)

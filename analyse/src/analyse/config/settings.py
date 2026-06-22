@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     max_research_items: int = Field(default=10, alias="MAX_RESEARCH_ITEMS")
     research_user_agent: str = Field(default="Mozilla/5.0 analyse-service/1.0", alias="RESEARCH_USER_AGENT")
     research_google_news_rss_enabled: bool = Field(default=True, alias="RESEARCH_GOOGLE_NEWS_RSS_ENABLED")
+    research_max_article_age_days: int = Field(default=730, alias="RESEARCH_MAX_ARTICLE_AGE_DAYS")
     research_source_priority: str = Field(
         default="vietstock.vn,cafef.vn,tinnhanhchungkhoan.vn,vneconomy.vn,bnews.vn",
         alias="RESEARCH_SOURCE_PRIORITY",

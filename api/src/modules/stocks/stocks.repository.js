@@ -1,4 +1,8 @@
 const DimStock = require('../../database/models/dim-stock.model');
+require('../../database/models/dim-market.model');
+require('../../database/models/dim-industry.model');
+require('../../database/models/dim-report-period.model');
+require('../../database/models/dim-stock-data-source.model');
 const FactMarketPrice = require('../../database/models/fact-market-price.model');
 const FactFinancialStatement = require('../../database/models/fact-financial-statement.model');
 const FactMarketOverview = require('../../database/models/fact-market-overview.model');
@@ -34,7 +38,8 @@ const findStocksAndCount = async ({ keyword, market, page = 1, limit = 10 }) => 
 };
 
 const findStockBySymbol = async (symbol) => {
-  return DimStock.findOne({ symbol: symbol.toUpperCase() })
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  return DimStock.findOne({ symbol: normalizedSymbol })
     .populate('market_id')
     .populate('industry_id')
     .lean();

@@ -7,6 +7,7 @@ const { generateAccessToken } = require('../src/common/utils/jwt.util');
 const watchlistsService = require('../src/modules/watchlists/watchlists.service');
 const watchlistsRouter = require('../src/modules/watchlists/watchlists.routes');
 const stocksRepository = require('../src/modules/stocks/stocks.repository');
+const { stocksRouter } = require('../src/modules/stocks/stocks.routes');
 const stocksService = require('../src/modules/stocks/stocks.service');
 const errorMiddleware = require('../src/common/middlewares/error.middleware');
 
@@ -328,6 +329,121 @@ test('stocksService.getStockAnalysisData vẫn trả dataQuality khi thiếu BCT
     assert.strictEqual(result.dataQuality.financialsLoaded, false);
     assert.ok(result.dataQuality.missingFields.includes('financials.periods'));
     assert.ok(result.dataQuality.warnings.some((warning) => warning.includes('BCTC')));
+  });
+});
+
+test('/api/stocks endpoints trả 200 và giữ backward compatibility khi stock tồn tại', async () => {
+  const fixture = buildStockFixture();
+
+  await withRepositoryStubs({
+    findStockBySymbol: async (symbol) => {
+      assert.strictEqual(symbol, 'FPT');
+      return fixture.stock;
+    },
+    findLatestPriceForStock: async (stockId) => (
+      stockId.toString() === 'stock-cmg' ? fixture.peerPrice : fixture.price
+    ),
+    findPricesForStock: async (stockId) => (
+      stockId.toString() === 'stock-cmg' ? fixture.peerPrices : fixture.prices
+    ),
+    findFinancialStatementsForStock: async (stockId) => (
+      stockId.toString() === 'stock-cmg'
+        ? [{ ...fixture.financial, profit_after_tax: 8000, net_revenue: 50000 }]
+        : [fixture.financial]
+    ),
+    findLatestMarketOverviewForMarket: async () => fixture.overview,
+    findPeersByIndustry: async () => [fixture.peer]
+  }, async () => {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/stocks', stocksRouter);
+    app.use(errorMiddleware);
+
+    await withServer(app, async (server) => {
+      const detail = await request(server, '/api/stocks/fpt');
+      assert.strictEqual(detail.status, 200);
+      assert.strictEqual(detail.json.success, true);
+      assert.strictEqual(detail.json.data.symbol, 'FPT');
+      assert.strictEqual(detail.json.data.latest_price.close_price, 71500);
+      assert.strictEqual(Array.isArray(detail.json.data.financials), true);
+      assert.strictEqual(detail.json.data.latestMarket.close_price, 71500);
+
+      const chart = await request(server, '/api/stocks/FPT/chart?range=3m');
+      assert.strictEqual(chart.status, 200);
+      assert.strictEqual(chart.json.success, true);
+      assert.strictEqual(chart.json.data.length, 2);
+
+      const analysis = await request(server, '/api/stocks/FPT/analysis-data?exchange=HOSE&quarters=6&chartRange=3m&includePeers=true&includeMarketContext=true');
+      assert.strictEqual(analysis.status, 200);
+      assert.strictEqual(analysis.json.success, true);
+      assert.strictEqual(analysis.json.data.latestMarket.close_price, 71500);
+      assert.strictEqual(analysis.json.data.financials.periods.length, 1);
+      assert.strictEqual(analysis.json.data.priceHistory.length, 2);
+      assert.strictEqual(analysis.json.data.dataQuality.priceHistoryPoints, 2);
+    });
+  });
+});
+
+test('stocks endpoints không trả 500 khi optional financial/market/peer/chart query lỗi', async () => {
+  const fixture = buildStockFixture();
+
+  await withRepositoryStubs({
+    findStockBySymbol: async () => fixture.stock,
+    findLatestPriceForStock: async () => fixture.price,
+    findPricesForStock: async () => {
+      throw new Error('chart collection unavailable');
+    },
+    findFinancialStatementsForStock: async () => {
+      throw new Error('financial collection unavailable');
+    },
+    findLatestMarketOverviewForMarket: async () => {
+      throw new Error('market overview unavailable');
+    },
+    findPeersByIndustry: async () => {
+      throw new Error('peer lookup unavailable');
+    }
+  }, async () => {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/stocks', stocksRouter);
+    app.use(errorMiddleware);
+
+    await withServer(app, async (server) => {
+      const detail = await request(server, '/api/stocks/FPT');
+      assert.strictEqual(detail.status, 200);
+      assert.strictEqual(detail.json.data.symbol, 'FPT');
+      assert.strictEqual(detail.json.data.latestMarket.close_price, 71500);
+      assert.strictEqual(detail.json.data.financials.length, 0);
+      assert.ok(detail.json.data.dataQuality.warnings.some((warning) => warning.includes('financial statements')));
+
+      const chart = await request(server, '/api/stocks/FPT/chart?range=3m');
+      assert.strictEqual(chart.status, 200);
+      assert.deepStrictEqual(chart.json.data, []);
+
+      const analysis = await request(server, '/api/stocks/FPT/analysis-data?exchange=HOSE&quarters=6&chartRange=3m&includePeers=true&includeMarketContext=true');
+      assert.strictEqual(analysis.status, 200);
+      assert.strictEqual(analysis.json.data.financials.periods.length, 0);
+      assert.strictEqual(analysis.json.data.priceHistory.length, 0);
+      assert.strictEqual(analysis.json.data.industryPeerContext.peers.length, 0);
+      assert.ok(analysis.json.data.dataQuality.warnings.some((warning) => warning.includes('market overview')));
+    });
+  });
+});
+
+test('/api/stocks invalid symbol trả 404, không phải 500', async () => {
+  await withRepositoryStubs({
+    findStockBySymbol: async () => null
+  }, async () => {
+    const app = express();
+    app.use(express.json());
+    app.use('/api/stocks', stocksRouter);
+    app.use(errorMiddleware);
+
+    await withServer(app, async (server) => {
+      const detail = await request(server, '/api/stocks/ZZZ');
+      assert.strictEqual(detail.status, 404);
+      assert.strictEqual(detail.json.success, false);
+    });
   });
 });
 

@@ -203,12 +203,15 @@ RESEARCH_TIMEOUT_MS=20000
 MAX_RESEARCH_ITEMS=10
 RESEARCH_USER_AGENT=Mozilla/5.0 analyse-service/1.0
 RESEARCH_GOOGLE_NEWS_RSS_ENABLED=true
+RESEARCH_MAX_ARTICLE_AGE_DAYS=730
 RESEARCH_SOURCE_PRIORITY=vietstock.vn,cafef.vn,tinnhanhchungkhoan.vn,vneconomy.vn,bnews.vn
 ```
 
 Trong request, `options.includeExternalResearch=true` cũng yêu cầu service lấy tin tức/nghiên cứu. Tin tức được chuẩn hóa gồm nguồn, tiêu đề, URL, ngày đăng, snippet, tone, relevance score, positive flags, negative flags và catalyst flags nếu phát hiện được từ keyword.
 
 Nếu nguồn lỗi hoặc timeout, report vẫn được tạo. Response sẽ có warning và `data_sources`/`external_research_context.source_statuses` cho biết nguồn nào lỗi.
+
+Mặc định research bỏ qua bài quá `RESEARCH_MAX_ARTICLE_AGE_DAYS=730` ngày. Khi phân tích mã `FPT`, service cũng loại các bài chỉ nói về FPT Retail/FRT nếu nội dung không thể hiện rõ chủ đề là công ty mẹ FPT.
 
 ## 5. Test bằng Postman
 
@@ -276,6 +279,20 @@ Response vẫn giữ shape cũ và có path thật:
 10. Trả JSON response thống nhất.
 
 LLM chỉ được đóng góp narrative: `strengths`, `weaknesses`, `system_decision.reasons`, narrative Markdown và `data_quality_notes`. Giá, volume, EPS, P/E, P/B, ROE, score, vùng giá và dữ liệu Backend không bị LLM ghi đè.
+
+### Data coverage khi Backend lỗi
+
+Các flag trong `summary.data_coverage` phản ánh dữ liệu thực sự dùng được, không phản ánh việc đã thử gọi endpoint:
+
+- `analysis_data_loaded=true` chỉ khi `/api/stocks/{symbol}/analysis-data` trả payload dùng được.
+- `backend_stock_detail_loaded=true` chỉ khi `/api/stocks/{symbol}` trả payload dùng được.
+- `latest_price_loaded=true` chỉ khi `latest_market` có giá/volume.
+- `financials_loaded=true` chỉ khi `financials.periods` có ít nhất một kỳ.
+- `price_history_points` bằng đúng số điểm chart đã nhận.
+- `market_context_loaded=true` chỉ khi market context có field như VNINDEX/change/regime.
+- `peer_context_loaded=true` chỉ khi danh sách peers không rỗng.
+
+Nếu cả ba stock endpoint Backend đều lỗi 500, service vẫn có thể tạo Markdown/HTML với warning rõ ràng, nhưng các flag trên phải là `false` hoặc `0` tương ứng.
 
 ## 7. Chạy test
 

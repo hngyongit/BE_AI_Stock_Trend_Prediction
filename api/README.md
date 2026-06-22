@@ -47,6 +47,51 @@ Endpoint cũ `GET /api/stocks/:symbol` vẫn giữ shape cũ và được bổ s
 - `GET /api/watchlists`: watchlist cá nhân, bắt buộc Bearer JWT.
 - `POST /api/auth/login`: lấy access token/refresh token.
 
+## Stock endpoints và lỗi 500
+
+Các route stock phải trả 200 khi mã tồn tại, kể cả khi dữ liệu phụ chưa có:
+
+```http
+GET /api/stocks/FPT
+GET /api/stocks/FPT/chart?range=3m
+GET /api/stocks/FPT/analysis-data?exchange=HOSE&quarters=6&chartRange=3m&includePeers=true&includeMarketContext=true
+```
+
+Nếu stock tồn tại nhưng thiếu BCTC, market overview, peer hoặc chart, API trả object/array rỗng kèm `dataQuality.warnings`, không trả 500. Nếu symbol không tồn tại, API trả lỗi chuẩn 404.
+
+Lỗi production từng gặp:
+
+```text
+Schema hasn't been registered for model "DimIndustry".
+```
+
+Nguyên nhân là `DimStock.industry_id` có `ref: "DimIndustry"` nhưng model chưa được require trước khi `populate("industry_id")`. Module stock repository hiện đăng ký sẵn `DimMarket`, `DimIndustry`, `DimReportPeriod` và `DimStockDataSource` trước khi chạy populate.
+
+Khi endpoint stock vẫn trả 500, kiểm tra log server. Controller stock ghi log an toàn gồm endpoint, symbol, query, error name/message và stack ở môi trường non-production.
+
+## Behavior khi thiếu optional data
+
+`analysis-data` luôn cố dựng payload ổn định:
+
+```json
+{
+  "latestMarket": {},
+  "priceHistory": [],
+  "financials": { "periods": [] },
+  "financialBalance": {},
+  "hoseMarketContext": {},
+  "industryPeerContext": { "industry": {}, "peers": [] },
+  "marketGeneralContext": {},
+  "sameIndustryRecommendation": {},
+  "dataQuality": {
+    "missingFields": [],
+    "warnings": []
+  }
+}
+```
+
+Các phần BCTC/market/peer là optional. Không fake dữ liệu: nếu MongoDB chưa có record thì field để rỗng và ghi warning.
+
 ## Auth/token
 
 `/api/watchlists` dùng middleware `authMiddleware`, yêu cầu header:

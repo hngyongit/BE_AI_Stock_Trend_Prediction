@@ -113,6 +113,25 @@ class FakeBackendClientWatchlist401(FakeBackendClient):
         raise RuntimeError("401 Unauthorized")
 
 
+class FakeBackendClientAllStockApisFail(FakeBackendClient):
+    async def get_stock_analysis_data(
+        self,
+        symbol: str,
+        exchange: str | None = None,
+        quarters: int = 6,
+        chart_range: str = "3m",
+        include_peers: bool = True,
+        include_market_context: bool = True,
+    ):
+        raise RuntimeError("500 Internal Server Error")
+
+    async def get_stock_detail(self, symbol: str):
+        raise RuntimeError("500 Internal Server Error")
+
+    async def get_stock_chart(self, symbol: str, range_value: str = "1m"):
+        raise RuntimeError("500 Internal Server Error")
+
+
 class FakeResearchService:
     async def search(self, symbol: str, company: str | None = None):
         return ExternalResearchContext(enabled=True, status="success", items=[], flag_summary={})
@@ -426,3 +445,48 @@ def test_report_service_warns_when_render_html_false(monkeypatch, tmp_path):
     assert data["html_report"]["output_path"] is None
     assert any("options.renderHtml=false" in warning for warning in data["warnings"])
     assert any(source["name"] == "Report HTML file" and source["status"] == "disabled" for source in data["data_sources"])
+
+
+def test_backend_500_sets_coverage_flags_false_and_report_still_generates(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    settings = Settings(
+        OPENAI_MODEL="gpt-env",
+        ENABLE_EXTERNAL_RESEARCH=False,
+        BACKEND_WATCHLIST_REQUIRED=False,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    service = ReportService(settings=settings, backend_client=FakeBackendClientAllStockApisFail(), research_service=FakeResearchService())
+    request = AnalyseOneReportRequest.model_validate(
+        {
+            "provider": "openai",
+            "symbol": "FPT",
+            "scopeExchange": "HOSE",
+            "options": {
+                "includeExternalResearch": False,
+                "renderMarkdown": True,
+                "renderHtml": True,
+            },
+        }
+    )
+
+    result = asyncio.run(service.analyse_one_report(request))
+    data = result["data"]
+    coverage = data["summary"]["data_coverage"]
+
+    assert result["code"] == 200
+    assert coverage["analysis_data_loaded"] is False
+    assert coverage["backend_stock_detail_loaded"] is False
+    assert coverage["latest_price_loaded"] is False
+    assert coverage["financials_loaded"] is False
+    assert coverage["price_history_points"] == 0
+    assert data["summary"]["latest_market"] == {}
+    assert data["summary"]["scores"]["score_confidence"] < 0.6
+    assert data["markdown_report"]["available"] is True
+    assert data["html_report"]["available"] is True
+    assert len(data["warnings"]) == len(set(data["warnings"]))
+    assert any(source["name"] == "Backend /api/stocks/:symbol/analysis-data" and source["status"] == "failed" for source in data["data_sources"])
+    assert any(source["name"] == "Backend /api/stocks/:symbol" and source["status"] == "failed" for source in data["data_sources"])
+    assert any(source["name"] == "Backend /api/stocks/:symbol/chart" and source["status"] == "failed" for source in data["data_sources"])

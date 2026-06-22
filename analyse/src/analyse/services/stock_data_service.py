@@ -35,6 +35,9 @@ class StockDataService:
         source_statuses = data.get("source_statuses") or data.get("sourceStatuses") or []
         if not isinstance(source_statuses, list):
             source_statuses = []
+        source_success = data.get("_source_success") or data.get("source_success") or data.get("sourceSuccess") or {}
+        if not isinstance(source_success, dict):
+            source_success = {}
 
         return {
             "symbol": data.get("symbol") or self._nested_value(data, "stock", "symbol"),
@@ -52,6 +55,7 @@ class StockDataService:
             "same_industry_recommendation": self._first_dict(data, "same_industry_recommendation", "sameIndustryRecommendation"),
             "data_quality": data_quality,
             "source_statuses": source_statuses,
+            "_source_success": source_success,
             "raw": data,
         }
 
