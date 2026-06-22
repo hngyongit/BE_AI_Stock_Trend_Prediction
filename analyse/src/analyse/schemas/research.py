@@ -14,6 +14,9 @@ class ResearchItem(BaseModel):
     snippet: str | None = None
     tone: str | None = None
     relevance_score: float | None = None
+    positive_flags: list[str] = Field(default_factory=list)
+    negative_flags: list[str] = Field(default_factory=list)
+    catalyst_flags: list[str] = Field(default_factory=list)
     status: SourceStatus = "success"
 
 
@@ -22,4 +25,5 @@ class ExternalResearchContext(BaseModel):
     status: SourceStatus = "disabled"
     items: list[ResearchItem] = Field(default_factory=list)
     flag_summary: dict = Field(default_factory=dict)
+    source_statuses: list[dict] = Field(default_factory=list)
     note: str | None = None

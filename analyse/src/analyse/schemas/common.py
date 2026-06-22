@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 ProviderName = Literal["openai", "gemini"]
 SourceStatus = Literal["success", "partial", "failed", "disabled", "not_implemented"]
 
-DEFAULT_DISCLAIMER = "Báo cáo chỉ phục vụ tham khảo/học tập, không phải khuyến nghị đầu tư cá nhân hóa."
+DEFAULT_DISCLAIMER = "Báo cáo này chỉ phục vụ tham khảo/học tập, không phải khuyến nghị đầu tư cá nhân hóa."
 
 
 class ErrorDetail(BaseModel):

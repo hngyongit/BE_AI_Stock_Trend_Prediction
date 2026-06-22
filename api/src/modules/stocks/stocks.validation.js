@@ -25,6 +25,15 @@ const getChartValidation = [
   query('range').optional().toLowerCase().isIn(['7d', '1m', '3m', '6m', '1y', 'all']).withMessage('Range must be one of: 7d, 1m, 3m, 6m, 1y, all')
 ];
 
+const getAnalysisDataValidation = [
+  param('symbol').notEmpty().withMessage('Symbol is required').trim().toUpperCase(),
+  query('exchange').optional().trim().toUpperCase(),
+  query('quarters').optional().isInt({ min: 1, max: 12 }).withMessage('Quarters must be an integer from 1 to 12'),
+  query('chartRange').optional().toLowerCase().isIn(['7d', '1m', '3m', '6m', '1y', 'all']).withMessage('Chart range must be one of: 7d, 1m, 3m, 6m, 1y, all'),
+  query('includePeers').optional().isBoolean().withMessage('includePeers must be a boolean').toBoolean(),
+  query('includeMarketContext').optional().isBoolean().withMessage('includeMarketContext must be a boolean').toBoolean()
+];
+
 const createStockValidation = [
   body('symbol')
     .notEmpty().withMessage('Symbol is required')
@@ -73,6 +82,7 @@ module.exports = {
   validate,
   getStocksValidation,
   getChartValidation,
+  getAnalysisDataValidation,
   createStockValidation,
   updateStockValidation
 };

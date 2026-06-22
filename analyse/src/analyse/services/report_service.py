@@ -20,6 +20,7 @@ from analyse.schemas.stock import StockAnalysisRequest, StockFetchAnalysisReques
 from analyse.schemas.watchlist import WatchlistAnalysisRequest
 from analyse.services.html_service import HtmlService
 from analyse.services.markdown_service import MarkdownService
+from analyse.services.report_file_service import ReportFileService
 from analyse.services.stock_data_service import StockDataService
 from analyse.services.summary_service import SummaryService
 from analyse.services.watchlist_service import WatchlistService
@@ -41,9 +42,10 @@ class ReportService:
         self.research_service = research_service or ExternalResearchService(self.settings)
         self.watchlist_service = WatchlistService(self.settings)
         self.stock_data_service = StockDataService()
-        self.summary_service = SummaryService(self.stock_data_service)
+        self.summary_service = SummaryService(self.stock_data_service, settings=self.settings)
         self.markdown_service = MarkdownService()
         self.html_service = HtmlService(self.settings)
+        self.report_file_service = ReportFileService(self.settings.report_output_dir)
 
     def build_direct_stock_placeholder(self, payload: StockAnalysisRequest) -> dict:
         symbol = normalize_symbol(payload.symbol)
@@ -80,18 +82,28 @@ class ReportService:
         data_sources: list[DataSourceStatus] = []
         provider_name: ProviderName = payload.provider or self.settings.default_llm_provider
 
+        watchlist_loaded = False
         try:
             watchlist_payload = await self.backend_client.get_watchlists()
             watchlist_symbols = self.watchlist_service.extract_symbols_from_backend_payload(watchlist_payload)
             allowed_symbols = self.watchlist_service.limit_symbols(watchlist_symbols)
+            watchlist_loaded = True
             data_sources.append(DataSourceStatus(name="Backend /api/watchlists", type="backend_api", status="success"))
         except Exception as exc:
             allowed_symbols = [symbol]
-            warnings.append(f"Chưa gọi được /api/watchlists: {exc}")
-            data_sources.append(DataSourceStatus(name="Backend /api/watchlists", type="backend_api", status="failed", detail=str(exc)))
+            warning = self._watchlist_failure_warning(exc)
+            warnings.append(warning)
+            data_sources.append(DataSourceStatus(name="Backend /api/watchlists", type="backend_api", status="failed", detail=self._safe_error_detail(exc)))
+            if self.settings.backend_watchlist_required:
+                return api_error(
+                    "Không thể phân tích vì Backend watchlists là bắt buộc nhưng đang lỗi",
+                    "BACKEND_WATCHLIST_UNAVAILABLE",
+                    code=502,
+                    details=[{"field": "BACKEND_WATCHLIST_REQUIRED", "message": warning}],
+                )
 
         is_allowed, symbol = self.watchlist_service.validate_symbol_allowed(symbol, allowed_symbols)
-        if self.settings.analyse_one_symbol_only and not is_allowed:
+        if self.settings.analyse_one_symbol_only and watchlist_loaded and not is_allowed:
             return api_error(
                 "Symbol không nằm trong 5 mã watchlist hợp lệ",
                 "SYMBOL_NOT_IN_WATCHLIST",
@@ -99,28 +111,24 @@ class ReportService:
                 details=[{"field": "symbol", "message": f"{symbol} không nằm trong danh sách {allowed_symbols}"}],
             )
 
-        try:
-            stock_payload = await self.backend_client.get_stock_detail(symbol)
-            stock_detail = self.stock_data_service.normalize_stock_detail(stock_payload)
-            data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol", type="backend_api", status="success"))
-        except Exception as exc:
-            stock_detail = {"stock": {"symbol": symbol}, "latest_price": {}, "financials": {}}
-            warnings.append(f"Chưa gọi được /api/stocks/:symbol: {exc}")
-            data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol", type="backend_api", status="failed", detail=str(exc)))
-
-        if hasattr(self.backend_client, "get_stock_chart"):
-            try:
-                chart_range = self._chart_range_for_time_horizon(payload.options.time_horizon)
-                chart_payload = await self.backend_client.get_stock_chart(symbol, range_value=chart_range)
-                stock_detail = self.stock_data_service.merge_chart_history(stock_detail, chart_payload)
-                data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol/chart", type="backend_api", status="success", detail=f"range={chart_range}"))
-            except Exception as exc:
-                warnings.append(f"Chưa gọi được /api/stocks/:symbol/chart: {exc}")
-                data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol/chart", type="backend_api", status="partial", detail=str(exc)))
+        stock_detail, stock_source_warnings = await self._load_stock_detail_for_analysis(symbol, payload.scope_exchange, data_sources)
+        warnings.extend(stock_source_warnings)
 
         company = self.stock_data_service.extract_company(stock_detail)
-        if payload.options.include_external_research:
-            research_context = await self.research_service.search(symbol=symbol, company=company)
+        should_include_external_research = payload.options.include_external_research or self.settings.enable_external_research
+        if should_include_external_research:
+            try:
+                research_context = await self.research_service.search(symbol=symbol, company=company)
+            except Exception as exc:
+                research_context = ExternalResearchContext(
+                    enabled=True,
+                    status="failed",
+                    items=[],
+                    flag_summary={"warnings": [str(exc)]},
+                    source_statuses=[{"name": "External Research", "status": "failed", "detail": str(exc)}],
+                    note="Không lấy được tin tức bên ngoài; cần kiểm tra thêm.",
+                )
+                warnings.append(f"External research lỗi: {exc}")
             data_sources.append(
                 DataSourceStatus(
                     name="External Research",
@@ -161,14 +169,70 @@ class ReportService:
         timestamp = timestamp_for_filename(self.settings.analyse_timezone)
         report_id = f"{symbol}_{payload.scope_exchange}_{timestamp}"
         markdown_content = None
+        markdown_output_path = None
+        if payload.options.render_markdown or payload.options.render_html:
+            llm_narrative = self.markdown_service.finalize_content(llm_markdown_content, summary)
+            markdown_content = self.markdown_service.build(summary, llm_narrative=llm_narrative)
+
         if payload.options.render_markdown:
-            markdown_content = self.markdown_service.finalize_content(llm_markdown_content, summary) or self.markdown_service.build(summary)
+            if self.settings.report_write_markdown:
+                try:
+                    markdown_output_path = self.report_file_service.write_markdown(report_id, markdown_content)
+                except Exception as exc:
+                    warnings.append(f"Không ghi được Markdown report: {exc}")
+                    data_sources.append(DataSourceStatus(name="Report Markdown file", type="filesystem", status="failed", detail=str(exc)))
+                else:
+                    data_sources.append(DataSourceStatus(name="Report Markdown file", type="filesystem", status="success", detail=markdown_output_path))
+            else:
+                warnings.append("Không xuất Markdown vì REPORT_WRITE_MARKDOWN=false.")
+                data_sources.append(DataSourceStatus(name="Report Markdown file", type="filesystem", status="disabled", detail="REPORT_WRITE_MARKDOWN=false"))
+        else:
+            warnings.append("Không xuất Markdown vì options.renderMarkdown=false.")
+            data_sources.append(DataSourceStatus(name="Report Markdown file", type="filesystem", status="disabled", detail="options.renderMarkdown=false"))
         markdown_report = MarkdownReport(
-            available=bool(markdown_content),
-            output_path=f"{self.settings.report_output_dir}/{report_id}.md" if markdown_content else None,
-            content=markdown_content,
+            available=bool(markdown_output_path),
+            output_path=markdown_output_path,
+            content=markdown_content if payload.options.render_markdown and self.settings.report_include_markdown_content_in_response else None,
         )
-        html_report: HtmlReport = self.html_service.build_metadata(report_id, summary) if payload.options.render_html else HtmlReport()
+        html_report = HtmlReport()
+        html_content = None
+        html_output_path = None
+        if payload.options.render_html:
+            if self.settings.report_write_html:
+                try:
+                    html_content = self.html_service.build(
+                        report_id,
+                        summary,
+                        markdown_content=markdown_content or "",
+                        data_sources=[source.model_dump() for source in data_sources],
+                        provider={
+                            "name": provider_name,
+                            "model": llm_result.model,
+                            "status": llm_result.status,
+                            "latency_ms": llm_result.latency_ms,
+                        },
+                    )
+                    html_output_path = self.report_file_service.write_html(report_id, html_content)
+                except Exception as exc:
+                    warnings.append(f"Không tạo/ghi được HTML report: {exc}")
+                    data_sources.append(DataSourceStatus(name="Report HTML file", type="filesystem", status="failed", detail=str(exc)))
+                else:
+                    data_sources.append(DataSourceStatus(name="Report HTML file", type="filesystem", status="success", detail=html_output_path))
+            else:
+                warnings.append("Không xuất HTML vì REPORT_WRITE_HTML=false.")
+                data_sources.append(DataSourceStatus(name="Report HTML file", type="filesystem", status="disabled", detail="REPORT_WRITE_HTML=false"))
+            html_report = HtmlReport(
+                available=bool(html_output_path),
+                output_path=html_output_path,
+                content=html_content if self.settings.report_include_html_content_in_response else None,
+                template_name="HtmlService.build" if html_output_path else None,
+            )
+        else:
+            warnings.append("Không xuất HTML vì options.renderHtml=false.")
+            data_sources.append(DataSourceStatus(name="Report HTML file", type="filesystem", status="disabled", detail="options.renderHtml=false"))
+
+        research_warnings = self._string_list((research_context.flag_summary or {}).get("warnings"))
+        warnings.extend([warning for warning in research_warnings if warning not in warnings])
 
         report = ReportGenerateResponse(
             data=ReportData(
@@ -195,6 +259,79 @@ class ReportService:
         if time_horizon in {"long", "long_term"}:
             return "1y"
         return "3m"
+
+    async def _load_stock_detail_for_analysis(
+        self,
+        symbol: str,
+        scope_exchange: str,
+        data_sources: list[DataSourceStatus],
+    ) -> tuple[dict, list[str]]:
+        warnings: list[str] = []
+        if self.settings.backend_use_analysis_data_endpoint and hasattr(self.backend_client, "get_stock_analysis_data"):
+            try:
+                stock_payload = await self.backend_client.get_stock_analysis_data(
+                    symbol=symbol,
+                    exchange=scope_exchange,
+                    quarters=self.settings.backend_analysis_data_quarters,
+                    chart_range=self.settings.backend_analysis_data_chart_range,
+                    include_peers=self.settings.backend_analysis_data_include_peers,
+                    include_market_context=self.settings.backend_analysis_data_include_market_context,
+                )
+                stock_detail = self.stock_data_service.normalize_analysis_data(stock_payload)
+                data_sources.append(
+                    DataSourceStatus(
+                        name="Backend /api/stocks/:symbol/analysis-data",
+                        type="backend_api",
+                        status="success",
+                        detail=(
+                            f"exchange={scope_exchange}; quarters={self.settings.backend_analysis_data_quarters}; "
+                            f"chartRange={self.settings.backend_analysis_data_chart_range}"
+                        ),
+                    )
+                )
+                return stock_detail, warnings
+            except Exception as exc:
+                warnings.append(f"Không gọi được analysis-data, đã fallback sang endpoint cũ. Chi tiết: {self._safe_error_detail(exc)}")
+                data_sources.append(
+                    DataSourceStatus(
+                        name="Backend /api/stocks/:symbol/analysis-data",
+                        type="backend_api",
+                        status="failed",
+                        detail=self._safe_error_detail(exc),
+                    )
+                )
+
+        try:
+            stock_payload = await self.backend_client.get_stock_detail(symbol)
+            stock_detail = self.stock_data_service.normalize_stock_detail(stock_payload)
+            data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol", type="backend_api", status="success"))
+        except Exception as exc:
+            stock_detail = {"symbol": symbol, "latest_market": {}, "financials": {"periods": []}}
+            warnings.append(f"Chưa gọi được /api/stocks/:symbol: {self._safe_error_detail(exc)}")
+            data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol", type="backend_api", status="failed", detail=self._safe_error_detail(exc)))
+
+        if hasattr(self.backend_client, "get_stock_chart"):
+            try:
+                chart_range = self.settings.backend_analysis_data_chart_range or "3m"
+                chart_payload = await self.backend_client.get_stock_chart(symbol, range_value=chart_range)
+                stock_detail = self.stock_data_service.merge_chart_history(stock_detail, chart_payload)
+                data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol/chart", type="backend_api", status="success", detail=f"range={chart_range}"))
+            except Exception as exc:
+                warnings.append(f"Chưa gọi được /api/stocks/:symbol/chart: {self._safe_error_detail(exc)}")
+                data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol/chart", type="backend_api", status="partial", detail=self._safe_error_detail(exc)))
+        return self.stock_data_service.normalize_analysis_data(stock_detail), warnings
+
+    def _watchlist_failure_warning(self, exc: Exception) -> str:
+        detail = self._safe_error_detail(exc)
+        if "401" in detail or "Unauthorized" in detail:
+            return "Không gọi được watchlists do thiếu/sai token. Phân tích vẫn tiếp tục bằng stock analysis-data."
+        return f"Không gọi được watchlists. Phân tích vẫn tiếp tục bằng stock analysis-data. Chi tiết: {detail}"
+
+    def _safe_error_detail(self, exc: Exception) -> str:
+        detail = str(exc)
+        if len(detail) > 300:
+            detail = detail[:297] + "..."
+        return detail
 
     def _select_model_override(self, requested_model: str | None, warnings: list[str]) -> str | None:
         if not requested_model:
