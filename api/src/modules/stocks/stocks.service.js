@@ -34,6 +34,32 @@ const parseBooleanOption = (value, fallback = true) => {
   return String(value).toLowerCase() === 'true';
 };
 
+const dedupeStrings = (values) => {
+  const result = [];
+  const seen = new Set();
+  for (const value of values || []) {
+    const clean = String(value || '').trim();
+    if (!clean || seen.has(clean)) continue;
+    result.push(clean);
+    seen.add(clean);
+  }
+  return result;
+};
+
+const optionalReadWarning = (label, error) => {
+  const detail = error && error.message ? error.message : String(error);
+  return `Không đọc được ${label}; đã trả dữ liệu rỗng cho phần này. Chi tiết: ${detail}`;
+};
+
+const safeOptionalRead = async (label, reader, fallback, warnings) => {
+  try {
+    return await reader();
+  } catch (error) {
+    warnings.push(optionalReadWarning(label, error));
+    return fallback;
+  }
+};
+
 const normalizeLatestMarket = (latestPrice) => {
   if (!latestPrice) return null;
 
@@ -232,11 +258,12 @@ const normalizeIndustry = (stock) => {
   };
 };
 
-const normalizePeer = async (peer) => {
+const normalizePeer = async (peer, warnings = []) => {
+  const peerLabel = peer?.symbol ? `peer ${peer.symbol}` : 'peer';
   const [latestPrice, latestFinancialRows, momentumPrices] = await Promise.all([
-    stocksRepository.findLatestPriceForStock(peer._id),
-    stocksRepository.findFinancialStatementsForStock(peer._id, 1),
-    stocksRepository.findPricesForStock(peer._id, 30)
+    safeOptionalRead(`${peerLabel} latest price`, () => stocksRepository.findLatestPriceForStock(peer._id), null, warnings),
+    safeOptionalRead(`${peerLabel} financial statements`, () => stocksRepository.findFinancialStatementsForStock(peer._id, 1), [], warnings),
+    safeOptionalRead(`${peerLabel} price history`, () => stocksRepository.findPricesForStock(peer._id, 30), [], warnings)
   ]);
   const latestFinancial = latestFinancialRows?.[0] ? normalizeFinancialPeriod(latestFinancialRows[0]) : {};
   const latestMarket = normalizeLatestMarket(latestPrice) || {};
@@ -280,7 +307,8 @@ const buildDataQuality = ({
   financials,
   marketContext,
   peers,
-  stock
+  stock,
+  extraWarnings = []
 }) => {
   const missingFields = [];
   const warnings = [];
@@ -295,7 +323,7 @@ const buildDataQuality = ({
     missingFields.push('hoseMarketContext');
     warnings.push('Không tìm thấy VNINDEX/market overview trong factMarketOverviews.');
   }
-  if (!stock.industry_id) {
+  if (!stock?.industry_id) {
     missingFields.push('industry');
     warnings.push('Stock chưa gắn industry_id nên không thể dựng peer context đầy đủ.');
   }
@@ -304,6 +332,7 @@ const buildDataQuality = ({
   }
 
   warnings.push('Đơn vị tiền tệ/market_cap cần kiểm tra thêm vì model hiện chưa lưu metadata đơn vị.');
+  warnings.push(...extraWarnings);
 
   return {
     financialsLoaded: Boolean(financials?.periods?.length),
@@ -311,8 +340,8 @@ const buildDataQuality = ({
     priceHistoryPoints: Array.isArray(priceHistory) ? priceHistory.length : 0,
     marketContextLoaded: Boolean(marketContext && Object.keys(marketContext).length > 0),
     peerContextLoaded: Array.isArray(peers) && peers.length > 0,
-    missingFields,
-    warnings,
+    missingFields: dedupeStrings(missingFields),
+    warnings: dedupeStrings(warnings),
     units: {
       price: 'VND',
       volume: 'shares',
@@ -363,7 +392,6 @@ const getStockDetail = async (symbol) => {
     throw error;
   }
 
-  const latestPrice = await stocksRepository.findLatestPriceForStock(stock._id);
   const supplemental = await buildAnalysisDataForStock(stock, {
     quarters: 6,
     chartRange: '3m',
@@ -397,15 +425,15 @@ const getStockDetail = async (symbol) => {
     dataQuality: supplemental.dataQuality
   };
 
-  if (latestPrice) {
-    const { _id, stock_id, market_id, industry_id, data_source_id, __v, ...priceData } = latestPrice;
+  if (supplemental.latestMarket) {
+    const priceData = supplemental.latestMarket;
     result.latest_price = {
       ...priceData,
       price_change: priceData.price_change || 0,
       price_change_percent: priceData.price_change_percent || 0,
       market_cap: priceData.market_cap || 0
     };
-    result.latestMarket = normalizeLatestMarket(latestPrice);
+    result.latestMarket = supplemental.latestMarket;
     result.latest_market = result.latestMarket;
   }
 
@@ -422,7 +450,18 @@ const getStockChart = async (symbol, range = '1m') => {
 
   const limitNum = getRangeLimit(range);
 
-  const prices = await stocksRepository.findPricesForStock(stock._id, limitNum);
+  let prices = [];
+  try {
+    prices = await stocksRepository.findPricesForStock(stock._id, limitNum);
+  } catch (error) {
+    console.error('[StocksService] Không đọc được chart price history', {
+      symbol: stock.symbol,
+      range,
+      errorName: error.name,
+      errorMessage: error.message
+    });
+    prices = [];
+  }
 
   return prices.map(p => ({
     time: formatTimeIdToDateString(p.time_id),
@@ -443,6 +482,7 @@ const buildAnalysisDataForStock = async (
     includeMarketContext = true
   } = {}
 ) => {
+  const warnings = [];
   const marketCode = stock.market_id?.code || '';
   const marketId = stock.market_id?._id || stock.market_id || null;
   const industryId = stock.industry_id?._id || stock.industry_id || null;
@@ -457,14 +497,14 @@ const buildAnalysisDataForStock = async (
     marketOverview,
     peerStocks
   ] = await Promise.all([
-    stocksRepository.findLatestPriceForStock(stock._id),
-    stocksRepository.findPricesForStock(stock._id, getRangeLimit(chartRange)),
-    stocksRepository.findFinancialStatementsForStock(stock._id, normalizedQuarters),
+    safeOptionalRead('latest market price', () => stocksRepository.findLatestPriceForStock(stock._id), null, warnings),
+    safeOptionalRead('price history', () => stocksRepository.findPricesForStock(stock._id, getRangeLimit(chartRange)), [], warnings),
+    safeOptionalRead('financial statements', () => stocksRepository.findFinancialStatementsForStock(stock._id, normalizedQuarters), [], warnings),
     shouldIncludeMarketContext
-      ? stocksRepository.findLatestMarketOverviewForMarket(marketId, marketCode)
+      ? safeOptionalRead('market overview', () => stocksRepository.findLatestMarketOverviewForMarket(marketId, marketCode), null, warnings)
       : Promise.resolve(null),
     shouldIncludePeers
-      ? stocksRepository.findPeersByIndustry(industryId, stock._id, 10)
+      ? safeOptionalRead('industry peers', () => stocksRepository.findPeersByIndustry(industryId, stock._id, 10), [], warnings)
       : Promise.resolve([])
   ]);
 
@@ -474,7 +514,7 @@ const buildAnalysisDataForStock = async (
   const financialBalance = buildFinancialBalance(financials);
   const hoseMarketContext = normalizeMarketContext(marketOverview);
   const peers = shouldIncludePeers
-    ? await Promise.all((peerStocks || []).map(normalizePeer))
+    ? await Promise.all((peerStocks || []).map((peer) => normalizePeer(peer, warnings)))
     : [];
   const industryPeerContext = {
     industry: normalizeIndustry(stock),
@@ -495,7 +535,8 @@ const buildAnalysisDataForStock = async (
     financials,
     marketContext: hoseMarketContext,
     peers,
-    stock
+    stock,
+    extraWarnings: warnings
   });
 
   return {

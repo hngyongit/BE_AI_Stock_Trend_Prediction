@@ -40,15 +40,29 @@ class SummaryService:
         financial_periods = self._list(financials.get("periods"))
         financial_balance = self._dict(normalized.get("financial_balance"))
         data_quality = self._dict(normalized.get("data_quality"))
+        source_success = self._dict(normalized.get("_source_success"))
         company = normalized.get("company") or self.stock_data_service.extract_company(stock_detail)
         data_quality_notes = self._build_data_quality_notes(data_quality, financial_periods, warnings)
+        hose_market_context = self._dict(normalized.get("hose_market_context"))
+        industry_peer_context = self._dict(normalized.get("industry_peer_context"))
+        peers = self._list(industry_peer_context.get("peers"))
+        analysis_data_loaded = self._source_loaded(
+            source_success,
+            "analysis_data_loaded",
+            fallback=self._looks_like_analysis_data(normalized),
+        )
+        backend_stock_detail_loaded = self._source_loaded(
+            source_success,
+            "backend_stock_detail_loaded",
+            fallback=bool(stock_detail),
+        )
 
         scoring_input = {
             **normalized,
             "latest_market": latest_market,
             "price_history": price_history,
             "financials": {"periods": financial_periods},
-            "hose_market_context": self._dict(normalized.get("hose_market_context")),
+            "hose_market_context": hose_market_context,
         }
         if self.settings.enable_scoring:
             scores = self.scoring_service.build_scores(scoring_input)
@@ -62,14 +76,14 @@ class SummaryService:
             "scope_exchange": scope_exchange or normalized.get("exchange") or "HOSE",
             "disclaimer": DEFAULT_DISCLAIMER,
             "data_coverage": {
-                "backend_stock_detail_loaded": bool(stock_detail),
-                "analysis_data_loaded": bool(normalized.get("raw")),
-                "latest_price_loaded": bool(latest_market),
+                "backend_stock_detail_loaded": backend_stock_detail_loaded,
+                "analysis_data_loaded": analysis_data_loaded,
+                "latest_price_loaded": self._has_latest_price(latest_market),
                 "financials_loaded": bool(financial_periods),
                 "financial_periods_count": len(financial_periods),
                 "price_history_points": len(price_history),
-                "market_context_loaded": bool(self._dict(normalized.get("hose_market_context"))),
-                "peer_context_loaded": bool(self._list(self._dict(normalized.get("industry_peer_context")).get("peers"))),
+                "market_context_loaded": self._has_market_context(hose_market_context),
+                "peer_context_loaded": bool(peers),
                 "external_research_items": len(research_context.items) if research_context else 0,
             },
             "latest_market": latest_market,
@@ -81,8 +95,8 @@ class SummaryService:
                 "data_quality_notes": data_quality_notes,
             },
             "financial_balance": financial_balance,
-            "hose_market_context": self._dict(normalized.get("hose_market_context")),
-            "industry_peer_context": self._dict(normalized.get("industry_peer_context")),
+            "hose_market_context": hose_market_context,
+            "industry_peer_context": industry_peer_context,
             "market_general_context": self._dict(normalized.get("market_general_context")),
             "same_industry_recommendation": self._dict(normalized.get("same_industry_recommendation")),
             "data_quality": data_quality,
@@ -92,11 +106,45 @@ class SummaryService:
             "strengths": self._default_strengths(latest_market, financial_periods, scores),
             "weaknesses": self._default_weaknesses(data_quality, scores),
             "external_research_context": research_context.model_dump() if research_context else {"enabled": False, "status": "disabled", "items": []},
-            "system_decision": self._build_system_decision(scores, data_quality, bool(financial_periods), self._dict(normalized.get("hose_market_context"))),
+            "system_decision": self._build_system_decision(scores, data_quality, bool(financial_periods), hose_market_context),
             "investment_plan": {"decision": {}, "reference_levels": {}, "position_sizing": {}, "action_table": []},
             "warnings": self._dedupe([*(warnings or []), *self._string_list(data_quality.get("warnings"))]),
         }
         return summary
+
+    def _source_loaded(self, source_success: dict[str, Any], key: str, *, fallback: bool) -> bool:
+        if key in source_success:
+            return bool(source_success.get(key))
+        return fallback
+
+    def _looks_like_analysis_data(self, normalized: dict[str, Any]) -> bool:
+        raw = self._dict(normalized.get("raw"))
+        return any(
+            key in raw
+            for key in (
+                "latestMarket",
+                "latest_market",
+                "priceHistory",
+                "price_history",
+                "financials",
+                "dataQuality",
+                "data_quality",
+                "hoseMarketContext",
+                "industryPeerContext",
+            )
+        )
+
+    def _has_latest_price(self, latest_market: dict[str, Any]) -> bool:
+        return any(
+            isinstance(latest_market.get(key), (int, float))
+            for key in ("close_price", "close", "last_price", "price", "open_price", "volume")
+        )
+
+    def _has_market_context(self, market_context: dict[str, Any]) -> bool:
+        return any(
+            market_context.get(key) not in (None, "", {}, [])
+            for key in ("vnindex", "change", "change_percent", "total_volume", "total_value", "regime", "foreign_net")
+        )
 
     def _build_momentum(self, price_history: Any) -> dict[str, Any]:
         if not isinstance(price_history, list) or len(price_history) < 2:

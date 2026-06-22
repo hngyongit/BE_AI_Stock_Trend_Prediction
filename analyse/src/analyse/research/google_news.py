@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 import time
@@ -18,6 +19,7 @@ from analyse.research.base import POSITIVE_KEYWORDS
 from analyse.research.base import infer_tone
 from analyse.research.base import keyword_flags
 from analyse.research.base import normalize_domain
+from analyse.research.base import parse_datetime_for_sort
 from analyse.research.base import parse_datetime_to_iso
 from analyse.research.base import strip_html
 from analyse.schemas.research import ResearchItem
@@ -150,13 +152,17 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
 
         if self.domain_filter and self.domain_filter not in source_domain:
             return None
+        if self._is_too_old(published_at):
+            return None
         if not self._is_relevant(title=title, snippet=description, symbol=symbol, company=company):
+            return None
+        if self._is_irrelevant_fpt_retail(title=title, snippet=description, symbol=symbol, company=company):
             return None
 
         full_text = " ".join(value for value in (title, description) if value)
-        positive_flags = keyword_flags(full_text, POSITIVE_KEYWORDS)
-        negative_flags = keyword_flags(full_text, NEGATIVE_KEYWORDS)
-        catalyst_flags = keyword_flags(full_text, CATALYST_KEYWORDS)
+        positive_flags = self._dedupe_flags(keyword_flags(full_text, POSITIVE_KEYWORDS))
+        negative_flags = self._dedupe_flags(keyword_flags(full_text, NEGATIVE_KEYWORDS))
+        catalyst_flags = self._dedupe_flags(keyword_flags(full_text, CATALYST_KEYWORDS))
         relevance_score = self._score_item(
             title=title,
             snippet=description,
@@ -201,6 +207,45 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
                 return True
         return False
 
+    def _is_too_old(self, published_at: str | None) -> bool:
+        max_days = int(getattr(self.settings, "research_max_article_age_days", 730) or 0)
+        if max_days <= 0 or not published_at:
+            return False
+        parsed = parse_datetime_for_sort(published_at)
+        if parsed is None:
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        age_days = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).days
+        return age_days > max_days
+
+    def _is_irrelevant_fpt_retail(self, *, title: str | None, snippet: str | None, symbol: str, company: str | None = None) -> bool:
+        if symbol.strip().upper() != "FPT":
+            return False
+        content = f"{title or ''} {snippet or ''}".lower()
+        mentions_retail = "fpt retail" in content or re_contains_symbol(content, "frt")
+        if not mentions_retail:
+            return False
+        parent_markers = (
+            "tập đoàn fpt",
+            "tap doan fpt",
+            "ctcp fpt",
+            "công ty cổ phần fpt",
+            "cong ty co phan fpt",
+            "fpt corporation",
+        )
+        return not any(marker in content for marker in parent_markers)
+
+    def _dedupe_flags(self, flags: list[str]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for flag in flags:
+            clean = flag.strip()
+            if clean and clean not in seen:
+                result.append(clean)
+                seen.add(clean)
+        return result
+
     def _score_item(
         self,
         *,
@@ -238,13 +283,20 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
             seen.add(key)
         return result
 
-    def _sort_key(self, item: ResearchItem) -> tuple[float, str]:
-        return (item.relevance_score or 0.0, item.published_at or "")
+    def _sort_key(self, item: ResearchItem) -> tuple[float, float]:
+        published = parse_datetime_for_sort(item.published_at)
+        timestamp = published.timestamp() if published else 0.0
+        return (timestamp, item.relevance_score or 0.0)
 
     def _dedupe_key(self, item: ResearchItem) -> str:
-        if item.url:
-            return item.url
-        return (item.title or "").strip().lower()
+        title_key = self._normalize_title_key(item.title)
+        if title_key:
+            return title_key
+        return (item.url or "").strip().lower()
+
+    def _normalize_title_key(self, title: str | None) -> str:
+        normalized = re.sub(r"\W+", " ", (title or "").lower()).strip()
+        return normalized
 
     def _source_name_from_domain(self, domain: str) -> str | None:
         if not domain:

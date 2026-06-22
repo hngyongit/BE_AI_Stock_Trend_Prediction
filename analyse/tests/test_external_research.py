@@ -29,6 +29,34 @@ RSS = """<?xml version="1.0" encoding="UTF-8"?>
 </rss>
 """
 
+RSS_WITH_OLD_AND_RETAIL = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>FPT lợi nhuận tăng trong mảng chuyển đổi số</title>
+      <link>https://news.google.com/articles/fpt-new</link>
+      <pubDate>Mon, 22 Jun 2026 09:00:00 +0700</pubDate>
+      <source url="https://cafef.vn">CafeF</source>
+      <description>Tập đoàn FPT công bố kết quả kinh doanh tích cực.</description>
+    </item>
+    <item>
+      <title>FPT tin cũ từ năm 2019</title>
+      <link>https://news.google.com/articles/fpt-old</link>
+      <pubDate>Mon, 01 Jul 2019 09:00:00 +0700</pubDate>
+      <source url="https://cafef.vn">CafeF</source>
+      <description>FPT cổ phiếu có tin cũ.</description>
+    </item>
+    <item>
+      <title>FPT Retail FRT mở chuỗi mới</title>
+      <link>https://news.google.com/articles/frt-retail</link>
+      <pubDate>Mon, 22 Jun 2026 08:00:00 +0700</pubDate>
+      <source url="https://cafef.vn">CafeF</source>
+      <description>FPT Retail và FRT là chủ đề chính.</description>
+    </item>
+  </channel>
+</rss>
+"""
+
 
 class FakeHttpClient:
     def __init__(self, text=RSS):
@@ -92,6 +120,20 @@ def test_google_news_adapter_normalizes_rss_items(tmp_path):
     assert item.tone == "tích cực"
     assert "lợi nhuận tăng" in item.positive_flags
     assert "cổ tức" in item.catalyst_flags
+
+
+def test_google_news_filters_old_and_fpt_retail_items(tmp_path):
+    adapter = GoogleNewsResearchAdapter(
+        _settings(tmp_path),
+        http_client=FakeHttpClient(text=RSS_WITH_OLD_AND_RETAIL),
+    )
+
+    items = asyncio.run(adapter.search("FPT", company="CTCP FPT"))
+
+    assert len(items) == 1
+    assert items[0].title == "FPT lợi nhuận tăng trong mảng chuyển đổi số"
+    assert all("2019" not in (item.title or "") for item in items)
+    assert all("FPT Retail" not in (item.title or "") for item in items)
 
 
 def test_vietstock_and_cafef_adapters_use_google_news_domain_queries(tmp_path):
