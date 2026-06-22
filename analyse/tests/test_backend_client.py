@@ -10,3 +10,8 @@ def test_backend_client_builds_headers_without_token():
 def test_backend_client_builds_headers_with_token():
     client = BackendClient(Settings(BACKEND_API_TOKEN="abc"))
     assert client._headers()["Authorization"] == "Bearer abc"
+
+
+def test_backend_client_builds_configured_urls():
+    client = BackendClient(Settings(BACKEND_API_BASE_URL="http://localhost:5000"))
+    assert client._url("/api/watchlists") == "http://localhost:5000/api/watchlists"

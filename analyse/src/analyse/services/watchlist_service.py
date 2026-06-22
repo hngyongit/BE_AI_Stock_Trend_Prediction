@@ -25,7 +25,7 @@ class WatchlistService:
             if isinstance(item, str):
                 symbols.append(item)
             elif isinstance(item, dict):
-                symbols.append(item.get("symbol") or item.get("code") or item.get("stockSymbol"))
+                symbols.append(self._extract_symbol(item))
         return normalize_symbols(symbols)
 
     def limit_symbols(self, symbols: list[str]) -> list[str]:
@@ -42,3 +42,13 @@ class WatchlistService:
             "allowed_symbols": self.limit_symbols(symbols),
             "total_symbols_received": len(symbols),
         }
+
+    def _extract_symbol(self, item: dict[str, Any]) -> str | None:
+        direct = item.get("symbol") or item.get("code") or item.get("stockSymbol") or item.get("stock_code")
+        if direct:
+            return str(direct)
+
+        stock = item.get("stock") or item.get("stock_id")
+        if isinstance(stock, dict):
+            return stock.get("symbol") or stock.get("code") or stock.get("stockSymbol") or stock.get("stock_code")
+        return None

@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-ProviderName = Literal["gemini", "openai"]
+ProviderName = Literal["openai", "gemini"]
 SourceStatus = Literal["success", "partial", "failed", "disabled", "not_implemented"]
 
 DEFAULT_DISCLAIMER = "Báo cáo chỉ phục vụ tham khảo/học tập, không phải khuyến nghị đầu tư cá nhân hóa."

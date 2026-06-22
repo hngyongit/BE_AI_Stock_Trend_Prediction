@@ -17,6 +17,8 @@ dependencies = [
     "httpx",
     "openai",
     "google-genai",
+    "pytest",
+    "tzdata",
 ]
 
 [tool.setuptools.packages.find]

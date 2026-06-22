@@ -7,13 +7,13 @@ from analyse.providers.openai_provider import OpenAIProvider
 from analyse.schemas.common import ProviderName
 
 
-def get_llm_provider(provider: ProviderName, settings: Settings | None = None) -> BaseLLMProvider:
+def get_llm_provider(provider: ProviderName, settings: Settings | None = None, model: str | None = None) -> BaseLLMProvider:
     settings = settings or get_settings()
     provider_value = str(provider).strip().lower()
 
     if provider_value == "gemini":
-        return GeminiProvider(settings)
+        return GeminiProvider(settings, model=model)
     if provider_value == "openai":
-        return OpenAIProvider(settings)
+        return OpenAIProvider(settings, model=model)
 
     raise ValueError(f"Unsupported provider: {provider_value}")

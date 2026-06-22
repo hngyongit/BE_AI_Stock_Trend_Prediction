@@ -5,6 +5,8 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from analyse.schemas.common import ProviderName
+
 
 class Settings(BaseSettings):
     """Cấu hình runtime cho analyse service."""
@@ -28,10 +30,13 @@ class Settings(BaseSettings):
     max_watchlist_symbols: int = Field(default=5, alias="MAX_WATCHLIST_SYMBOLS")
     analyse_one_symbol_only: bool = Field(default=True, alias="ANALYSE_ONE_SYMBOL_ONLY")
 
-    enable_external_research: bool = Field(default=True, alias="ENABLE_EXTERNAL_RESEARCH")
-    enable_vietstock: bool = Field(default=True, alias="ENABLE_VIETSTOCK")
-    enable_cafef: bool = Field(default=True, alias="ENABLE_CAFEF")
-    enable_google_news_rss: bool = Field(default=True, alias="ENABLE_GOOGLE_NEWS_RSS")
+    default_llm_provider: ProviderName = Field(default="openai", alias="DEFAULT_LLM_PROVIDER")
+    allow_request_model_override: bool = Field(default=True, alias="ALLOW_REQUEST_MODEL_OVERRIDE")
+
+    enable_external_research: bool = Field(default=False, alias="ENABLE_EXTERNAL_RESEARCH")
+    enable_vietstock: bool = Field(default=False, alias="ENABLE_VIETSTOCK")
+    enable_cafef: bool = Field(default=False, alias="ENABLE_CAFEF")
+    enable_google_news_rss: bool = Field(default=False, alias="ENABLE_GOOGLE_NEWS_RSS")
     research_cache_dir: str = Field(default=".research_cache", alias="RESEARCH_CACHE_DIR")
     research_cache_ttl_seconds: int = Field(default=21600, alias="RESEARCH_CACHE_TTL_SECONDS")
     research_timeout_ms: int = Field(default=20000, alias="RESEARCH_TIMEOUT_MS")
@@ -43,7 +48,7 @@ class Settings(BaseSettings):
 
     gemini_enabled: bool = Field(default=True, alias="GEMINI_ENABLED")
     gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
-    gemini_model: str = Field(default="gemini-model-configurable", alias="GEMINI_MODEL")
+    gemini_model: str = Field(default="gemini-1.5-flash", alias="GEMINI_MODEL")
     gemini_temperature: float = Field(default=0.2, alias="GEMINI_TEMPERATURE")
     gemini_top_p: float = Field(default=0.9, alias="GEMINI_TOP_P")
     gemini_max_output_tokens: int = Field(default=8192, alias="GEMINI_MAX_OUTPUT_TOKENS")
@@ -52,7 +57,7 @@ class Settings(BaseSettings):
 
     openai_enabled: bool = Field(default=True, alias="OPENAI_ENABLED")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
-    openai_model: str = Field(default="openai-model-configurable", alias="OPENAI_MODEL")
+    openai_model: str = Field(default="gpt-4.1-mini", alias="OPENAI_MODEL")
     openai_temperature: float = Field(default=0.2, alias="OPENAI_TEMPERATURE")
     openai_max_output_tokens: int = Field(default=8192, alias="OPENAI_MAX_OUTPUT_TOKENS")
     openai_timeout_ms: int = Field(default=60000, alias="OPENAI_TIMEOUT_MS")

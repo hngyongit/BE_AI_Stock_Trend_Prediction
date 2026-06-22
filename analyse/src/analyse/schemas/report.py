@@ -9,7 +9,8 @@ from analyse.schemas.stock import AnalysisOptions
 
 
 class AnalyseOneReportRequest(BaseModel):
-    provider: ProviderName = "openai"
+    provider: ProviderName | None = None
+    model: str | None = None
     symbol: str
     scope_exchange: str = Field(default="HOSE", alias="scopeExchange")
     options: AnalysisOptions = Field(default_factory=AnalysisOptions)
