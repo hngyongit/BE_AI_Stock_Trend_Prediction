@@ -1,0 +1,17 @@
+{
+  "provider": "openai",
+  "model": "gpt-4.1-mini",
+  "symbol": "FPT",
+  "scopeExchange": "HOSE",
+  "options": {
+    "language": "vi",
+    "riskProfile": "medium",
+    "timeHorizon": "medium_term",
+    "includeExternalResearch": true,
+    "renderMarkdown": true,
+    "renderHtml": true,
+    "capitalVnd": 100000000,
+    "riskPerTradePct": 1.0,
+    "maxPositionPct": 12.0
+  }
+}

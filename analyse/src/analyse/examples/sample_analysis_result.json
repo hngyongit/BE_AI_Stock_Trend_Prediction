@@ -11,9 +11,9 @@
     "summary_schema_version": "1.0",
     "provider": {
       "name": "openai",
-      "model": "openai-model-configurable",
-      "status": "not_implemented",
-      "latency_ms": 0
+      "model": "gpt-4.1-mini",
+      "status": "success",
+      "latency_ms": 1200
     },
     "data_sources": [],
     "summary": {},
@@ -28,6 +28,6 @@
       "content": null,
       "template_name": "src/analyse/services/html_service.py::build_metadata"
     },
-    "warnings": ["Đây là response mẫu cho skeleton."]
+    "warnings": []
   }
 }

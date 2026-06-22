@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from analyse.schemas.common import DEFAULT_DISCLAIMER
+
 
 class MarkdownService:
     """Tạo Markdown report từ summary. Hiện là rule-based placeholder."""
@@ -26,3 +28,13 @@ class MarkdownService:
 
 Đây là Markdown placeholder. Cần triển khai LLM/rule-based report chi tiết ở bước tiếp theo.
 """.strip()
+
+    def finalize_content(self, content: str | None, summary: dict[str, Any]) -> str | None:
+        if not content or not content.strip():
+            return None
+
+        disclaimer = summary.get("disclaimer") or DEFAULT_DISCLAIMER
+        normalized = content.strip()
+        if disclaimer not in normalized:
+            normalized = f"{normalized}\n\n---\n\n{disclaimer}"
+        return normalized
