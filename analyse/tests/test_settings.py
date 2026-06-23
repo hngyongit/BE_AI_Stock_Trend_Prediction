@@ -1,4 +1,7 @@
 from analyse.config.settings import Settings
+from analyse.services.config_diagnostic_service import ConfigDiagnosticService
+
+import asyncio
 
 
 def test_settings_support_llm_selection_variables():
@@ -22,6 +25,13 @@ def test_settings_support_report_export_and_research_variables():
         REPORT_WRITE_HTML=True,
         REPORT_INCLUDE_MARKDOWN_CONTENT_IN_RESPONSE=False,
         REPORT_INCLUDE_HTML_CONTENT_IN_RESPONSE=True,
+        REPORT_CHART_ENGINE="echarts",
+        REPORT_CHART_ASSET_MODE="local",
+        REPORT_CHART_ASSET_DIR="reports/assets",
+        REPORT_ECHARTS_LOCAL_FILE="echarts.min.js",
+        REPORT_CHART_FALLBACK="inline_svg",
+        REPORT_CHART_ALLOW_CDN=False,
+        REPORT_ECHARTS_CDN_URL="",
         ENABLE_EXTERNAL_RESEARCH=True,
         ENABLE_VIETSTOCK=True,
         ENABLE_CAFEF=True,
@@ -36,6 +46,13 @@ def test_settings_support_report_export_and_research_variables():
     assert settings.report_write_html is True
     assert settings.report_include_markdown_content_in_response is False
     assert settings.report_include_html_content_in_response is True
+    assert settings.report_chart_engine == "echarts"
+    assert settings.report_chart_asset_mode == "local"
+    assert settings.report_chart_asset_dir == "reports/assets"
+    assert settings.report_echarts_local_file == "echarts.min.js"
+    assert settings.report_chart_fallback == "inline_svg"
+    assert settings.report_chart_allow_cdn is False
+    assert settings.report_echarts_cdn_url == ""
     assert settings.enable_external_research is True
     assert settings.enable_vietstock is True
     assert settings.enable_cafef is True
@@ -43,6 +60,78 @@ def test_settings_support_report_export_and_research_variables():
     assert settings.research_user_agent == "pytest-agent"
     assert settings.research_google_news_rss_enabled is True
     assert settings.research_source_priority == "cafef.vn,vietstock.vn"
+
+
+def test_settings_support_canonical_env_aliases_and_env_file_path():
+    settings = Settings(
+        LOG_LEVEL="DEBUG",
+        TIMEZONE="Asia/Ho_Chi_Minh",
+        CORS_ALLOWED_ORIGINS=" http://localhost:5173, http://127.0.0.1:5173, ",
+        CORS_ALLOW_CREDENTIALS=True,
+        REPORT_RENDER_MARKDOWN=False,
+        REPORT_RENDER_HTML=True,
+        BACKEND_API_VERIFY_SSL=False,
+        PLAYWRIGHT_HEADLESS=False,
+        PLAYWRIGHT_VIEWPORT_WIDTH=1280,
+        PLAYWRIGHT_VIEWPORT_HEIGHT=720,
+        PLAYWRIGHT_NAVIGATION_TIMEOUT_MS=45000,
+        PLAYWRIGHT_EXTRA_WAIT_MS=1500,
+    )
+
+    assert settings.analyse_log_level == "DEBUG"
+    assert settings.analyse_timezone == "Asia/Ho_Chi_Minh"
+    assert settings.cors_allowed_origin_list == ["http://localhost:5173", "http://127.0.0.1:5173"]
+    assert settings.effective_cors_allow_credentials is True
+    assert settings.report_write_markdown is False
+    assert settings.report_write_html is True
+    assert settings.backend_api_verify_ssl is False
+    assert settings.playwright_headless is False
+    assert settings.playwright_viewport_width == 1280
+    assert settings.playwright_viewport_height == 720
+    assert settings.playwright_navigation_timeout_ms == 45000
+    assert settings.playwright_extra_wait_ms == 1500
+    assert settings.env_file_path.endswith("analyse\\.env") or settings.env_file_path.endswith("analyse/.env")
+
+
+def test_settings_disables_cors_credentials_for_wildcard_origin():
+    settings = Settings(CORS_ALLOWED_ORIGINS="*", CORS_ALLOW_CREDENTIALS=True)
+
+    assert settings.cors_allowed_origin_list == ["*"]
+    assert settings.effective_cors_allow_credentials is False
+
+
+def test_env_example_documents_cors_variables():
+    content = (Settings().env_file_path.replace(".env", ".env.example"))
+    with open(content, encoding="utf-8") as handle:
+        text = handle.read()
+
+    assert "CORS_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173" in text
+    assert "CORS_ALLOW_CREDENTIALS=true" in text
+
+
+def test_cafef_financial_timeout_default_override_and_invalid_fallback():
+    assert Settings(_env_file=None).cafef_financial_timeout_ms == 90000
+    assert Settings(_env_file=None, CAFEF_FINANCIAL_TIMEOUT_MS=123456).cafef_financial_timeout_ms == 123456
+    assert Settings(_env_file=None, CAFEF_FINANCIAL_TIMEOUT_MS="not-a-number").cafef_financial_timeout_ms == 90000
+
+
+def test_config_check_masks_secrets():
+    settings = Settings(
+        BACKEND_API_TOKEN="secret-token",
+        OPENAI_API_KEY="sk-secret",
+        GEMINI_API_KEY="gemini-secret",
+        BACKEND_API_BASE_URL="http://localhost:5000/api",
+    )
+
+    data = asyncio.run(ConfigDiagnosticService(settings).build(check_backend=False))
+
+    assert data["backend"]["base_url"] == "http://localhost:5000"
+    assert data["backend"]["env_token_deprecated"] == "set"
+    assert data["backend"]["request_auth"] == "required_via_authorization_header"
+    assert data["providers"]["openai"] == "configured"
+    assert data["providers"]["gemini"] == "configured"
+    assert "secret-token" not in str(data)
+    assert "sk-secret" not in str(data)
 
 
 def test_settings_support_backend_analysis_data_and_scoring_variables():
@@ -77,3 +166,91 @@ def test_settings_support_backend_analysis_data_and_scoring_variables():
     assert settings.scoring_require_financials_for_overall is True
     assert settings.scoring_enable_market_context is False
     assert settings.scoring_enable_peer_context is False
+
+
+def test_settings_support_vietstock_bctc_aliases_and_peer_fallback():
+    settings = Settings(
+        ENABLE_CAFEF_COMPANY_FALLBACK=True,
+        CAFEF_COMPANY_URL_TEMPLATE="https://cafef.vn/du-lieu/{exchange}/{symbol}-ban-lanh-dao-so-huu.chn",
+        CAFEF_COMPANY_TIMEOUT_MS=33000,
+        CAFEF_COMPANY_CACHE_TTL_SECONDS=300,
+        CAFEF_COMPANY_USE_BROWSER_FALLBACK=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=True,
+        CAFEF_FINANCIAL_URL_TEMPLATE="https://cafef.vn/du-lieu/{exchange}/{symbol}-tai-chinh.chn",
+        CAFEF_FINANCIAL_TIMEOUT_MS=34000,
+        CAFEF_FINANCIAL_CACHE_TTL_SECONDS=400,
+        CAFEF_FINANCIAL_MAX_PERIODS=5,
+        CAFEF_FINANCIAL_UNIT="Triệu đồng",
+        CAFEF_FINANCIAL_USE_BROWSER_FALLBACK=False,
+        ENABLE_VIETSTOCK_BCTC_FALLBACK=True,
+        VIETSTOCK_BCTC_URL_TEMPLATE="https://finance.vietstock.vn/{symbol}/tai-chinh.htm?tab=BCTT",
+        VIETSTOCK_BCTC_TIMEOUT_MS=31000,
+        VIETSTOCK_BCTC_CACHE_TTL_SECONDS=100,
+        VIETSTOCK_BCTC_MAX_PERIODS=6,
+        VIETSTOCK_BCTC_UNIT="Triệu đồng",
+        VIETSTOCK_BCTC_USE_BROWSER_FALLBACK=False,
+        VIETSTOCK_BCTC_BROWSER_HEADLESS=False,
+        VIETSTOCK_BCTC_BROWSER_WAIT_UNTIL="load",
+        VIETSTOCK_BCTC_BROWSER_WAIT_SELECTOR="table",
+        VIETSTOCK_BCTC_BROWSER_EXTRA_WAIT_MS=1200,
+        VIETSTOCK_BCTC_BROWSER_VIEWPORT_WIDTH=1440,
+        VIETSTOCK_BCTC_BROWSER_VIEWPORT_HEIGHT=900,
+        ENABLE_VIETSTOCK_PEER_FALLBACK=True,
+        VIETSTOCK_PEER_URL_TEMPLATE="https://finance.vietstock.vn/{symbol}/so-sanh-gia-co-phieu-cung-nganh.htm",
+        VIETSTOCK_PEER_TIMEOUT_MS=32000,
+        VIETSTOCK_PEER_CACHE_TTL_SECONDS=200,
+        VIETSTOCK_PEER_MAX_ITEMS=7,
+        VIETSTOCK_PEER_USE_BROWSER_FALLBACK=False,
+        VIETSTOCK_PEER_DEFAULT_TAB="Tổng quan",
+        ENABLE_PEER_WEB_ENRICHMENT=True,
+        PEER_WEB_ENRICHMENT_MAX_PEERS=10,
+        PEER_WEB_ENRICHMENT_TIMEOUT_MS=30000,
+        PEER_RECOMMENDATION_TOP_N=5,
+        EXTERNAL_DATA_DEBUG_SAVE_RENDERED_HTML=True,
+        EXTERNAL_DATA_DEBUG_SAVE_EXTRACTION_JSON=True,
+        VIETSTOCK_DEBUG_SAVE_RENDERED_HTML=True,
+        VIETSTOCK_DEBUG_SAVE_EXTRACTION_JSON=True,
+        REPORT_MARKET_CHART_TYPE="segmented_bar",
+    )
+
+    assert settings.enable_cafef_company_fallback is True
+    assert settings.cafef_company_url_template.endswith("{symbol}-ban-lanh-dao-so-huu.chn")
+    assert settings.cafef_company_timeout_ms == 33000
+    assert settings.cafef_company_cache_ttl_seconds == 300
+    assert settings.cafef_company_use_browser_fallback is False
+    assert settings.enable_cafef_financial_fallback is True
+    assert settings.cafef_financial_url_template.endswith("{symbol}-tai-chinh.chn")
+    assert settings.cafef_financial_timeout_ms == 34000
+    assert settings.cafef_financial_cache_ttl_seconds == 400
+    assert settings.cafef_financial_max_periods == 5
+    assert settings.cafef_financial_unit == "Triệu đồng"
+    assert settings.cafef_financial_use_browser_fallback is False
+    assert settings.effective_enable_vietstock_financial_fallback is True
+    assert settings.effective_vietstock_financial_url_template.endswith("tab=BCTT")
+    assert settings.effective_vietstock_financial_timeout_ms == 31000
+    assert settings.effective_vietstock_financial_cache_ttl_seconds == 100
+    assert settings.effective_vietstock_financial_max_periods == 6
+    assert settings.effective_vietstock_financial_unit == "Triệu đồng"
+    assert settings.effective_vietstock_financial_use_browser_fallback is False
+    assert settings.effective_vietstock_financial_browser_headless is False
+    assert settings.effective_vietstock_financial_browser_wait_until == "load"
+    assert settings.effective_vietstock_financial_browser_wait_selector == "table"
+    assert settings.effective_vietstock_financial_browser_extra_wait_ms == 1200
+    assert settings.effective_vietstock_financial_browser_viewport_width == 1440
+    assert settings.effective_vietstock_financial_browser_viewport_height == 900
+    assert settings.enable_vietstock_peer_fallback is True
+    assert settings.vietstock_peer_url_template.endswith("so-sanh-gia-co-phieu-cung-nganh.htm")
+    assert settings.vietstock_peer_timeout_ms == 32000
+    assert settings.vietstock_peer_cache_ttl_seconds == 200
+    assert settings.vietstock_peer_max_items == 7
+    assert settings.vietstock_peer_use_browser_fallback is False
+    assert settings.vietstock_peer_default_tab == "Tổng quan"
+    assert settings.enable_peer_web_enrichment is True
+    assert settings.peer_web_enrichment_max_peers == 10
+    assert settings.peer_web_enrichment_timeout_ms == 30000
+    assert settings.peer_recommendation_top_n == 5
+    assert settings.external_data_debug_save_rendered_html is True
+    assert settings.external_data_debug_save_extraction_json is True
+    assert settings.vietstock_debug_save_rendered_html is True
+    assert settings.vietstock_debug_save_extraction_json is True
+    assert settings.report_market_chart_type == "segmented_bar"

@@ -53,6 +53,13 @@ RSS_WITH_OLD_AND_RETAIL = """<?xml version="1.0" encoding="UTF-8"?>
       <source url="https://cafef.vn">CafeF</source>
       <description>FPT Retail và FRT là chủ đề chính.</description>
     </item>
+    <item>
+      <title>FPT chứng quyền và thông báo chữ ký số</title>
+      <link>https://news.google.com/articles/fpt-warrant</link>
+      <pubDate>Mon, 22 Jun 2026 07:00:00 +0700</pubDate>
+      <source url="https://cafef.vn">CafeF</source>
+      <description>Static file chữ ký số không có giá trị phân tích.</description>
+    </item>
   </channel>
 </rss>
 """
@@ -134,6 +141,7 @@ def test_google_news_filters_old_and_fpt_retail_items(tmp_path):
     assert items[0].title == "FPT lợi nhuận tăng trong mảng chuyển đổi số"
     assert all("2019" not in (item.title or "") for item in items)
     assert all("FPT Retail" not in (item.title or "") for item in items)
+    assert all("chứng quyền" not in (item.title or "").lower() for item in items)
 
 
 def test_vietstock_and_cafef_adapters_use_google_news_domain_queries(tmp_path):

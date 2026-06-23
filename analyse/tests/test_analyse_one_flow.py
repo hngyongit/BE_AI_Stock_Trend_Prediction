@@ -10,15 +10,21 @@ from analyse.services.watchlist_service import WatchlistService
 
 
 class FakeBackendClient:
+    def __init__(self) -> None:
+        self.tokens: list[tuple[str, str]] = []
+
     async def get_stock_analysis_data(
         self,
         symbol: str,
+        *,
+        token: str,
         exchange: str | None = None,
         quarters: int = 6,
         chart_range: str = "3m",
         include_peers: bool = True,
         include_market_context: bool = True,
     ):
+        self.tokens.append(("analysis-data", token))
         return {
             "code": 200,
             "message": "ok",
@@ -72,7 +78,8 @@ class FakeBackendClient:
             },
         }
 
-    async def get_watchlists(self):
+    async def get_watchlists(self, *, token: str):
+        self.tokens.append(("watchlists", token))
         return {
             "data": {
                 "items": [
@@ -86,7 +93,8 @@ class FakeBackendClient:
             }
         }
 
-    async def get_stock_detail(self, symbol: str):
+    async def get_stock_detail(self, symbol: str, *, token: str):
+        self.tokens.append(("stock-detail", token))
         return {
             "data": {
                 "symbol": symbol,
@@ -104,12 +112,13 @@ class FakeBackendClient:
             }
         }
 
-    async def get_stock_chart(self, symbol: str, range_value: str = "1m"):
+    async def get_stock_chart(self, symbol: str, range_value: str = "1m", *, token: str):
+        self.tokens.append(("stock-chart", token))
         return {"data": [{"time": "2026-06-01", "close": 90.0}, {"time": "2026-06-22", "close": 100.0}]}
 
 
 class FakeBackendClientWatchlist401(FakeBackendClient):
-    async def get_watchlists(self):
+    async def get_watchlists(self, *, token: str):
         raise RuntimeError("401 Unauthorized")
 
 
@@ -117,6 +126,8 @@ class FakeBackendClientAllStockApisFail(FakeBackendClient):
     async def get_stock_analysis_data(
         self,
         symbol: str,
+        *,
+        token: str,
         exchange: str | None = None,
         quarters: int = 6,
         chart_range: str = "3m",
@@ -125,11 +136,162 @@ class FakeBackendClientAllStockApisFail(FakeBackendClient):
     ):
         raise RuntimeError("500 Internal Server Error")
 
-    async def get_stock_detail(self, symbol: str):
+    async def get_stock_detail(self, symbol: str, *, token: str):
         raise RuntimeError("500 Internal Server Error")
 
-    async def get_stock_chart(self, symbol: str, range_value: str = "1m"):
+    async def get_stock_chart(self, symbol: str, range_value: str = "1m", *, token: str):
         raise RuntimeError("500 Internal Server Error")
+
+
+class FakeBackendClientMissingFinancials(FakeBackendClient):
+    async def get_stock_analysis_data(
+        self,
+        symbol: str,
+        *,
+        token: str,
+        exchange: str | None = None,
+        quarters: int = 6,
+        chart_range: str = "3m",
+        include_peers: bool = True,
+        include_market_context: bool = True,
+    ):
+        payload = await super().get_stock_analysis_data(
+            symbol,
+            token=token,
+            exchange=exchange,
+            quarters=quarters,
+            chart_range=chart_range,
+            include_peers=include_peers,
+            include_market_context=include_market_context,
+        )
+        payload["data"]["financials"] = {"periods": []}
+        payload["data"]["financialBalance"] = {}
+        payload["data"]["dataQuality"]["financialsLoaded"] = False
+        payload["data"]["dataQuality"]["financialPeriodsCount"] = 0
+        payload["data"]["dataQuality"]["missingFields"] = ["financials.periods"]
+        return payload
+
+
+class FakeBackendClientMissingPeers(FakeBackendClient):
+    async def get_stock_analysis_data(
+        self,
+        symbol: str,
+        *,
+        token: str,
+        exchange: str | None = None,
+        quarters: int = 6,
+        chart_range: str = "3m",
+        include_peers: bool = True,
+        include_market_context: bool = True,
+    ):
+        payload = await super().get_stock_analysis_data(
+            symbol,
+            token=token,
+            exchange=exchange,
+            quarters=quarters,
+            chart_range=chart_range,
+            include_peers=include_peers,
+            include_market_context=include_market_context,
+        )
+        payload["data"]["industryPeerContext"] = {"industry": {}, "peers": []}
+        payload["data"]["sameIndustryRecommendation"] = {}
+        payload["data"]["dataQuality"]["peerContextLoaded"] = False
+        payload["data"]["dataQuality"]["missingFields"] = ["industryPeerContext.peers"]
+        return payload
+
+
+class FakeVietstockFinancialAdapter:
+    async def fetch(self, symbol: str):
+        return {
+            "source": "Vietstock Finance",
+            "source_url": f"https://finance.vietstock.vn/{symbol}/tai-chinh.htm?tab=BCTT",
+            "fetched_at": "2026-06-22T09:00:00+07:00",
+            "unit": "Tỷ đồng",
+            "periods": [
+                {
+                    "period": "Q1/2026",
+                    "year": 2026,
+                    "quarter": 1,
+                    "revenue": 52901,
+                    "gross_profit": 8365,
+                    "profit_after_tax": 9056,
+                    "parent_profit": 8994,
+                    "eps": 2886.77,
+                    "total_assets": 259328,
+                    "total_liabilities": 119546,
+                    "equity": 139782,
+                }
+            ],
+            "warnings": [],
+            "status": "success",
+        }
+
+
+class FakeVietstockFinancialEmptyAdapter:
+    async def fetch(self, symbol: str):
+        return {
+            "source": "Vietstock Finance",
+            "source_url": f"https://finance.vietstock.vn/{symbol}/tai-chinh.htm?tab=BCTT",
+            "periods": [],
+            "warnings": ["Vietstock Finance chưa cung cấp đủ kỳ BCTC trong lần chạy này."],
+            "technical_warnings": [],
+            "status": "insufficient",
+        }
+
+
+class FakeCafeFFinancialCrossCheckAdapter:
+    def __init__(self) -> None:
+        self.called = False
+
+    async def fetch(self, symbol: str, exchange: str | None = None):
+        self.called = True
+        return {
+            "source": "CafeF tài chính",
+            "source_url": f"https://cafef.vn/du-lieu/{(exchange or 'HOSE').lower()}/{symbol.lower()}-tai-chinh.chn",
+            "periods": [],
+            "warnings": ["CafeF chưa cung cấp đủ kỳ tài chính có thể chuẩn hóa trong lần chạy này."],
+            "technical_warnings": [],
+            "status": "insufficient",
+        }
+
+
+class FakeCafeFFinancialTimeoutAdapter:
+    async def fetch(self, symbol: str, exchange: str | None = None):
+        return {
+            "source": "CafeF tài chính",
+            "source_url": f"https://cafef.vn/du-lieu/{(exchange or 'HOSE').lower()}/{symbol.lower()}-tai-chinh.chn",
+            "periods": [],
+            "warnings": ["CafeF financial page timed out before usable financial periods were extracted."],
+            "technical_warnings": [],
+            "status": "insufficient",
+        }
+
+
+class FakeVietstockPeerAdapter:
+    async def fetch(self, symbol: str):
+        return {
+            "source": "Vietstock Finance",
+            "source_url": f"https://finance.vietstock.vn/{symbol}/so-sanh-gia-co-phieu-cung-nganh.htm",
+            "fetched_at": "2026-06-22T09:00:00+07:00",
+            "industry": "Cùng ngành theo Vietstock Finance",
+            "peers": [
+                {
+                    "symbol": "CMG",
+                    "company": "CMC",
+                    "exchange": "HOSE",
+                    "price": 50000,
+                    "pe": 12.0,
+                    "pb": 2.0,
+                    "roe": 15.0,
+                    "source": "Vietstock Finance",
+                    "source_url": f"https://finance.vietstock.vn/{symbol}/so-sanh-gia-co-phieu-cung-nganh.htm",
+                    "same_industry_reason": "Có trong bảng so sánh cùng ngành Vietstock Finance.",
+                    "confidence": 0.75,
+                }
+            ],
+            "warnings": [],
+            "status": "success",
+        }
 
 
 class FakeResearchService:
@@ -200,13 +362,25 @@ def test_watchlist_normalizes_and_validates_symbol():
 
 def test_symbol_outside_first_five_watchlist_returns_error(tmp_path):
     settings = Settings(ANALYSE_ONE_SYMBOL_ONLY=True, ENABLE_EXTERNAL_RESEARCH=False, REPORT_OUTPUT_DIR=str(tmp_path / "reports"))
-    service = ReportService(settings=settings, backend_client=FakeBackendClient(), research_service=FakeResearchService())
+    backend_client = FakeBackendClient()
+    service = ReportService(settings=settings, backend_client=backend_client, research_service=FakeResearchService())
     request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "SSI", "scopeExchange": "HOSE"})
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
 
     assert result["code"] == 403
     assert result["error"]["type"] == "SYMBOL_NOT_IN_WATCHLIST"
+
+
+def test_report_service_requires_request_token(tmp_path):
+    settings = Settings(ENABLE_EXTERNAL_RESEARCH=False, REPORT_OUTPUT_DIR=str(tmp_path / "reports"))
+    service = ReportService(settings=settings, backend_client=FakeBackendClient(), research_service=FakeResearchService())
+    request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
+
+    result = asyncio.run(service.analyse_one_report(request, user_token=""))
+
+    assert result["code"] == 401
+    assert result["error"]["type"] == "AUTH_REQUIRED"
 
 
 def test_report_service_uses_requested_provider_and_model(monkeypatch, tmp_path):
@@ -219,14 +393,17 @@ def test_report_service_uses_requested_provider_and_model(monkeypatch, tmp_path)
 
     monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
     settings = Settings(GEMINI_MODEL="gemini-env", ENABLE_EXTERNAL_RESEARCH=False, REPORT_OUTPUT_DIR=str(tmp_path / "reports"))
-    service = ReportService(settings=settings, backend_client=FakeBackendClient(), research_service=FakeResearchService())
+    backend_client = FakeBackendClient()
+    service = ReportService(settings=settings, backend_client=backend_client, research_service=FakeResearchService())
     request = AnalyseOneReportRequest.model_validate({"provider": "gemini", "model": "gemini-request", "symbol": "FPT", "scopeExchange": "HOSE"})
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
 
     assert captured == {"provider": "gemini", "model": "gemini-request"}
     assert result["data"]["provider"]["name"] == "gemini"
     assert result["data"]["provider"]["model"] == "gemini-request"
+    assert ("watchlists", "request-token") in backend_client.tokens
+    assert ("analysis-data", "request-token") in backend_client.tokens
 
 
 def test_report_service_falls_back_to_env_model_when_request_model_missing(monkeypatch, tmp_path):
@@ -238,7 +415,7 @@ def test_report_service_falls_back_to_env_model_when_request_model_missing(monke
     service = ReportService(settings=settings, backend_client=FakeBackendClient(), research_service=FakeResearchService())
     request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
 
     assert result["data"]["provider"]["name"] == "openai"
     assert result["data"]["provider"]["model"] == "gpt-env"
@@ -254,7 +431,7 @@ def test_llm_output_is_merged_without_overwriting_numeric_fields(monkeypatch, tm
     service = ReportService(settings=settings, backend_client=FakeBackendClient(), research_service=FakeResearchService())
     request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
     summary = result["data"]["summary"]
 
     assert summary["latest_market"]["close_price"] == 100.0
@@ -269,7 +446,7 @@ def test_llm_output_is_merged_without_overwriting_numeric_fields(monkeypatch, tm
     assert "LLM chỉ thấy dữ liệu BCTC rút gọn." in summary["data_quality_notes"]
     markdown_report = result["data"]["markdown_report"]
     html_report = result["data"]["html_report"]
-    assert markdown_report["content"].startswith("# Báo cáo phân tích cổ phiếu FPT trên HOSE")
+    assert markdown_report["content"].startswith("# Báo cáo phân tích cổ phiếu FPT / HOSE")
     assert "Nội dung diễn giải." in markdown_report["content"]
     assert "Báo cáo này chỉ phục vụ tham khảo/học tập" in markdown_report["content"]
     assert markdown_report["output_path"] is not None
@@ -279,7 +456,7 @@ def test_llm_output_is_merged_without_overwriting_numeric_fields(monkeypatch, tm
     assert html_report["content"] is None
 
 
-def test_watchlist_401_does_not_block_when_not_required(monkeypatch, tmp_path):
+def test_watchlist_401_returns_auth_error(monkeypatch, tmp_path):
     def fake_factory(provider, settings, model=None):
         return FakeLLMProvider(provider, model or settings.openai_model)
 
@@ -287,18 +464,21 @@ def test_watchlist_401_does_not_block_when_not_required(monkeypatch, tmp_path):
     settings = Settings(
         OPENAI_MODEL="gpt-env",
         ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_COMPANY_FALLBACK=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_PEER_FALLBACK=False,
         BACKEND_WATCHLIST_REQUIRED=False,
         REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
     )
     service = ReportService(settings=settings, backend_client=FakeBackendClientWatchlist401(), research_service=FakeResearchService())
     request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
 
-    assert result["code"] == 200
-    assert result["data"]["summary"]["data_coverage"]["financials_loaded"] is True
-    assert any("Không gọi được watchlists do thiếu/sai token" in warning for warning in result["data"]["warnings"])
-    assert any(source["name"] == "Backend /api/stocks/:symbol/analysis-data" and source["status"] == "success" for source in result["data"]["data_sources"])
+    assert result["code"] == 401
+    assert result["error"]["type"] == "AUTH_INVALID"
+    assert "token không hợp lệ" in result["message"]
 
 
 def test_report_service_writes_markdown_and_html_files_with_research(monkeypatch, tmp_path):
@@ -315,7 +495,7 @@ def test_report_service_writes_markdown_and_html_files_with_research(monkeypatch
     service = ReportService(settings=settings, backend_client=FakeBackendClient(), research_service=FakeResearchServiceWithItem())
     request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
     data = result["data"]
     md_path = Path(data["markdown_report"]["output_path"])
     html_path = Path(data["html_report"]["output_path"])
@@ -324,14 +504,14 @@ def test_report_service_writes_markdown_and_html_files_with_research(monkeypatch
     assert html_path.exists()
     markdown = md_path.read_text(encoding="utf-8")
     html = html_path.read_text(encoding="utf-8")
-    assert "# Báo cáo phân tích cổ phiếu FPT trên HOSE" in markdown
-    assert "## 1C. Nghiên cứu tin tức/ngành/thị trường bên ngoài" in markdown
+    assert "# Báo cáo phân tích cổ phiếu FPT / HOSE" in markdown
+    assert "## 9. Tin tức và dữ liệu bên ngoài" in markdown
     assert "CafeF" in markdown
     assert "<!doctype html>" in html
     assert '<section id="external-research">' in html
     assert "Báo cáo này chỉ phục vụ tham khảo/học tập" in html
     assert data["html_report"]["content"] is None
-    assert any(source["name"] == "External Research" for source in data["data_sources"])
+    assert any(source["name"] == "Tin tức và nghiên cứu bên ngoài" for source in data["data_sources"])
 
 
 def test_report_service_writes_both_files_when_render_html_true(monkeypatch, tmp_path):
@@ -363,7 +543,7 @@ def test_report_service_writes_both_files_when_render_html_true(monkeypatch, tmp
         }
     )
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
     data = result["data"]
 
     assert data["markdown_report"]["available"] is True
@@ -372,8 +552,11 @@ def test_report_service_writes_both_files_when_render_html_true(monkeypatch, tmp
     assert data["html_report"]["content"] is None
     assert Path(data["markdown_report"]["output_path"]).exists()
     assert Path(data["html_report"]["output_path"]).exists()
-    assert any(source["name"] == "Report Markdown file" and source["status"] == "success" for source in data["data_sources"])
-    assert any(source["name"] == "Report HTML file" and source["status"] == "success" for source in data["data_sources"])
+    source_names = {source["name"] for source in data["data_sources"]}
+    assert "Report Markdown file" not in source_names
+    assert "Report HTML file" not in source_names
+    assert "File Markdown" not in source_names
+    assert "File HTML" not in source_names
 
 
 def test_report_service_warns_when_html_export_disabled_by_settings(monkeypatch, tmp_path):
@@ -402,7 +585,7 @@ def test_report_service_warns_when_html_export_disabled_by_settings(monkeypatch,
         }
     )
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
     data = result["data"]
 
     assert data["markdown_report"]["available"] is True
@@ -410,7 +593,7 @@ def test_report_service_warns_when_html_export_disabled_by_settings(monkeypatch,
     assert data["html_report"]["output_path"] is None
     assert data["html_report"]["template_name"] is None
     assert any("REPORT_WRITE_HTML=false" in warning for warning in data["warnings"])
-    assert any(source["name"] == "Report HTML file" and source["status"] == "disabled" for source in data["data_sources"])
+    assert all("Report HTML file" != source["name"] for source in data["data_sources"])
 
 
 def test_report_service_warns_when_render_html_false(monkeypatch, tmp_path):
@@ -438,13 +621,13 @@ def test_report_service_warns_when_render_html_false(monkeypatch, tmp_path):
         }
     )
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
     data = result["data"]
 
     assert data["html_report"]["available"] is False
     assert data["html_report"]["output_path"] is None
     assert any("options.renderHtml=false" in warning for warning in data["warnings"])
-    assert any(source["name"] == "Report HTML file" and source["status"] == "disabled" for source in data["data_sources"])
+    assert all("Report HTML file" != source["name"] for source in data["data_sources"])
 
 
 def test_backend_500_sets_coverage_flags_false_and_report_still_generates(monkeypatch, tmp_path):
@@ -455,6 +638,10 @@ def test_backend_500_sets_coverage_flags_false_and_report_still_generates(monkey
     settings = Settings(
         OPENAI_MODEL="gpt-env",
         ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_COMPANY_FALLBACK=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_PEER_FALLBACK=False,
         BACKEND_WATCHLIST_REQUIRED=False,
         REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
     )
@@ -472,7 +659,7 @@ def test_backend_500_sets_coverage_flags_false_and_report_still_generates(monkey
         }
     )
 
-    result = asyncio.run(service.analyse_one_report(request))
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
     data = result["data"]
     coverage = data["summary"]["data_coverage"]
 
@@ -487,6 +674,171 @@ def test_backend_500_sets_coverage_flags_false_and_report_still_generates(monkey
     assert data["markdown_report"]["available"] is True
     assert data["html_report"]["available"] is True
     assert len(data["warnings"]) == len(set(data["warnings"]))
-    assert any(source["name"] == "Backend /api/stocks/:symbol/analysis-data" and source["status"] == "failed" for source in data["data_sources"])
-    assert any(source["name"] == "Backend /api/stocks/:symbol" and source["status"] == "failed" for source in data["data_sources"])
-    assert any(source["name"] == "Backend /api/stocks/:symbol/chart" and source["status"] == "failed" for source in data["data_sources"])
+    assert any(source["name"] == "Dữ liệu giá và thanh khoản" and source["status"] == "failed" for source in data["data_sources"])
+    assert any(source["name"] == "Hồ sơ cổ phiếu đã xác thực" and source["status"] == "failed" for source in data["data_sources"])
+    assert any(source["name"] == "Chuỗi giá" and source["status"] == "failed" for source in data["data_sources"])
+
+
+def test_vietstock_financial_fallback_fills_missing_bctc(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    settings = Settings(
+        OPENAI_MODEL="gpt-env",
+        ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=True,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    service = ReportService(settings=settings, backend_client=FakeBackendClientMissingFinancials(), research_service=FakeResearchService())
+    service.vietstock_financial_adapter = FakeVietstockFinancialAdapter()
+    request = AnalyseOneReportRequest.model_validate(
+        {
+            "provider": "openai",
+            "symbol": "HPG",
+            "scopeExchange": "HOSE",
+            "options": {
+                "includeExternalResearch": False,
+                "renderMarkdown": True,
+                "renderHtml": True,
+            },
+        }
+    )
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+    data = result["data"]
+    summary = data["summary"]
+
+    assert result["code"] == 200
+    assert summary["data_coverage"]["financials_loaded"] is True
+    assert summary["bctc_3q"]["has_bctc"] is True
+    assert summary["bctc_3q"]["periods"][0]["period"] == "Q1/2026"
+    assert summary["financial_balance"]["total_assets"] == 259328
+    assert any(source["name"] == "Vietstock Finance BCTC" and source["status"] == "success" for source in data["data_sources"])
+    assert "Báo cáo đã bổ sung dữ liệu tài chính từ Vietstock Finance" in " ".join(summary["data_quality_notes"])
+
+
+def test_vietstock_bctc_success_still_attempts_cafef_financial(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    settings = Settings(
+        OPENAI_MODEL="gpt-env",
+        ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=True,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=True,
+        EXTERNAL_DATA_DEBUG_SAVE_EXTRACTION_JSON=True,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    service = ReportService(settings=settings, backend_client=FakeBackendClientMissingFinancials(), research_service=FakeResearchService())
+    service.vietstock_financial_adapter = FakeVietstockFinancialAdapter()
+    cafef_adapter = FakeCafeFFinancialCrossCheckAdapter()
+    service.cafef_financial_adapter = cafef_adapter
+    request = AnalyseOneReportRequest.model_validate(
+        {
+            "provider": "openai",
+            "symbol": "HPG",
+            "scopeExchange": "HOSE",
+            "options": {
+                "includeExternalResearch": False,
+                "renderMarkdown": False,
+                "renderHtml": False,
+            },
+        }
+    )
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+    data = result["data"]
+
+    assert result["code"] == 200
+    assert cafef_adapter.called is True
+    assert any(source["name"] == "Vietstock Finance BCTC" and source["status"] == "success" for source in data["data_sources"])
+    assert any(source["name"] == "CafeF tài chính" and source["status"] == "insufficient" for source in data["data_sources"])
+    assert not any(source["name"] == "CafeF tài chính" and source["status"] == "skipped" for source in data["data_sources"])
+
+
+def test_analyse_one_returns_report_when_cafef_financial_times_out(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    settings = Settings(
+        OPENAI_MODEL="gpt-env",
+        ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=True,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=True,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    service = ReportService(settings=settings, backend_client=FakeBackendClientMissingFinancials(), research_service=FakeResearchService())
+    service.vietstock_financial_adapter = FakeVietstockFinancialEmptyAdapter()
+    service.cafef_financial_adapter = FakeCafeFFinancialTimeoutAdapter()
+    request = AnalyseOneReportRequest.model_validate(
+        {
+            "provider": "openai",
+            "symbol": "VCB",
+            "scopeExchange": "HOSE",
+            "options": {
+                "includeExternalResearch": False,
+                "renderMarkdown": False,
+                "renderHtml": False,
+            },
+        }
+    )
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+    serialized_sources = str(result["data"]["data_sources"])
+
+    assert result["code"] == 200
+    assert any(source["name"] == "CafeF tài chính" and source["status"] == "failed" for source in result["data"]["data_sources"])
+    assert "https://cafef.vn" not in serialized_sources
+    assert "periods=0" not in serialized_sources
+    attempt_path = tmp_path / "reports" / "debug" / "VCB_cafef_financial_attempt.json"
+    assert attempt_path.exists()
+    attempt = attempt_path.read_text(encoding="utf-8")
+    assert '"attempted": true' in attempt
+    assert '"periods_found": 0' in attempt
+    assert "request-token" not in attempt
+    assert "sk-" not in attempt
+
+
+def test_vietstock_peer_fallback_fills_missing_peer_context(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    settings = Settings(
+        OPENAI_MODEL="gpt-env",
+        ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_COMPANY_FALLBACK=False,
+        ENABLE_VIETSTOCK_PEER_FALLBACK=True,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    service = ReportService(settings=settings, backend_client=FakeBackendClientMissingPeers(), research_service=FakeResearchService())
+    service.vietstock_peer_adapter = FakeVietstockPeerAdapter()
+    request = AnalyseOneReportRequest.model_validate(
+        {
+            "provider": "openai",
+            "symbol": "FPT",
+            "scopeExchange": "HOSE",
+            "options": {
+                "includeExternalResearch": False,
+                "renderMarkdown": True,
+                "renderHtml": True,
+            },
+        }
+    )
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+    data = result["data"]
+    summary = data["summary"]
+
+    assert result["code"] == 200
+    assert summary["data_coverage"]["peer_context_loaded"] is True
+    assert summary["industry_peer_context"]["peers"][0]["symbol"] == "CMG"
+    assert summary["same_industry_recommendation"]["candidates"][0]["ticker"] == "CMG"
+    assert summary["same_industry_recommendation"]["candidates"][0]["confidence"] >= 0.75
+    assert any(source["name"] == "Vietstock peer cùng ngành" and source["status"] == "success" for source in data["data_sources"])
+    assert "CMG" in data["markdown_report"]["content"]
+    assert "Tỷ lệ tin cậy" in data["markdown_report"]["content"]

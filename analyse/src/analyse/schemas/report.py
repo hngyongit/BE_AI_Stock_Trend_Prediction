@@ -29,7 +29,12 @@ class DataSourceStatus(BaseModel):
     name: str
     type: str
     status: SourceStatus
+    category: str | None = None
+    status_label: str | None = None
+    summary: str | None = None
     detail: str | None = None
+    source_type: str | None = None
+    debug_detail: str | None = None
 
 
 class MarkdownReport(BaseModel):

@@ -74,6 +74,14 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
             f"{clean_symbol} cổ tức{domain}",
             f"{clean_symbol} khuyến nghị cổ phiếu{domain}",
         ]
+        if clean_symbol == "HPG":
+            queries.extend(
+                [
+                    f"{clean_symbol} thép giá thép{domain}",
+                    f"{clean_symbol} HRC quặng sắt{domain}",
+                    f"{clean_symbol} đầu tư công xây dựng{domain}",
+                ]
+            )
         if clean_company:
             queries.insert(1, f"{clean_symbol} {clean_company}{domain}")
         for suffix in self.query_suffixes:
@@ -153,6 +161,8 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
         if self.domain_filter and self.domain_filter not in source_domain:
             return None
         if self._is_too_old(published_at):
+            return None
+        if self._is_low_value_item(title=title, snippet=description):
             return None
         if not self._is_relevant(title=title, snippet=description, symbol=symbol, company=company):
             return None
@@ -235,6 +245,21 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
             "fpt corporation",
         )
         return not any(marker in content for marker in parent_markers)
+
+    def _is_low_value_item(self, *, title: str | None, snippet: str | None) -> bool:
+        content = f"{title or ''} {snippet or ''}".lower()
+        low_value_markers = (
+            "chứng quyền",
+            "covered warrant",
+            "warrant",
+            "chữ ký số",
+            "signature",
+            "static file",
+            "file đính kèm",
+            "thông báo ký số",
+            "bản tin chứng quyền",
+        )
+        return any(marker in content for marker in low_value_markers)
 
     def _dedupe_flags(self, flags: list[str]) -> list[str]:
         result: list[str] = []

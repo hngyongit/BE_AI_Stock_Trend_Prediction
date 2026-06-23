@@ -96,7 +96,10 @@ class ExternalResearchService:
         return (published.replace(tzinfo=None), relevance, priority)
 
     def _dedupe_key(self, item: ResearchItem) -> str:
-        title_key = re.sub(r"\W+", " ", (item.title or "").lower()).strip()
+        title = (item.title or "").lower()
+        title = re.sub(r"\s+-\s+[^-]+$", "", title)
+        title = re.sub(r"\b(cập nhật|mới nhất|nóng|hot)\b", " ", title)
+        title_key = re.sub(r"\W+", " ", title).strip()
         if title_key:
             return title_key
         return (item.url or "").strip().lower()
