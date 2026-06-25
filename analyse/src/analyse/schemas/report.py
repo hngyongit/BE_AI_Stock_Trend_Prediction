@@ -29,7 +29,14 @@ class DataSourceStatus(BaseModel):
     name: str
     type: str
     status: SourceStatus
+    category: str | None = None
+    status_label: str | None = None
+    summary: str | None = None
     detail: str | None = None
+    source_type: str | None = None
+    debug_detail: str | None = None
+    evidence_count: int | None = None
+    last_crawled_at: str | None = None
 
 
 class MarkdownReport(BaseModel):
@@ -46,6 +53,7 @@ class HtmlReport(BaseModel):
 
 
 class ReportData(BaseModel):
+    history_id: str | None = Field(default=None, exclude=True)
     report_id: str
     generated_at: str
     symbol: str
@@ -53,6 +61,10 @@ class ReportData(BaseModel):
     scope_exchange: str = "HOSE"
     language: str = "vi"
     summary_schema_version: str = "1.0"
+    analysis_status: str = "success"
+    history_status: str = "disabled"
+    source_status: str = "success"
+    report_status: str = "success"
     provider: ProviderMetadata
     data_sources: list[DataSourceStatus] = Field(default_factory=list)
     summary: dict[str, Any] = Field(default_factory=dict)

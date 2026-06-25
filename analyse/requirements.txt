@@ -6,5 +6,8 @@ python-dotenv
 httpx
 openai
 google-genai
+playwright
+sqlalchemy
+pyodbc
 pytest
 tzdata

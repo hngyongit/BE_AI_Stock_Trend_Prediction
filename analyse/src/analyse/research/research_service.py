@@ -8,6 +8,7 @@ from analyse.research.cafef import CafeFResearchAdapter
 from analyse.research.google_news import GoogleNewsResearchAdapter
 from analyse.research.base import normalize_domain
 from analyse.research.base import parse_datetime_for_sort
+from analyse.research.source_registry import SourceRegistry
 from analyse.research.vietstock import VietstockResearchAdapter
 from analyse.schemas.research import ExternalResearchContext, ResearchItem
 
@@ -18,6 +19,7 @@ class ExternalResearchService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.source_priority = self._parse_source_priority(self.settings.research_source_priority)
+        self.source_registry = SourceRegistry(self.settings)
 
     async def search(self, symbol: str, company: str | None = None) -> ExternalResearchContext:
         adapters = self._build_adapters()
@@ -70,7 +72,47 @@ class ExternalResearchService:
             adapters.append(CafeFResearchAdapter(self.settings))
         if self.settings.enable_google_news_rss and self.settings.research_google_news_rss_enabled:
             adapters.append(GoogleNewsResearchAdapter(self.settings))
+            adapters.extend(self._domain_research_adapters())
         return adapters
+
+    def _domain_research_adapters(self) -> list[GoogleNewsResearchAdapter]:
+        if not self.settings.enable_source_backed_research:
+            return []
+        adapters: list[GoogleNewsResearchAdapter] = []
+        seen = {"vietstock.vn", "cafef.vn"}
+        max_sources = max(1, int(getattr(self.settings, "source_backed_research_max_sources_per_symbol", 12) or 12))
+        news_domains = self._parse_source_priority(self.settings.research_source_priority)
+        official_domains = self._parse_source_priority(getattr(self.settings, "research_official_source_priority", ""))
+        for domain in [*news_domains, *official_domains]:
+            if not domain or domain in seen:
+                continue
+            seen.add(domain)
+            official = domain in official_domains
+            adapters.append(
+                self._make_google_news_adapter(
+                    source_name=self.source_registry.display_name_for_domain(domain, official=official),
+                    source_type="official_disclosure" if official else "trusted_vietnamese_financial_news",
+                    domain_filter=domain,
+                    query_suffixes=[
+                        "kết quả kinh doanh",
+                        "báo cáo tài chính",
+                        "triển vọng",
+                        "rủi ro",
+                        "cổ tức",
+                        "lãnh đạo",
+                    ],
+                )
+            )
+            if len(adapters) >= max(0, max_sources - 3):
+                break
+        return adapters
+
+    def _make_google_news_adapter(self, **kwargs) -> GoogleNewsResearchAdapter:
+        try:
+            return GoogleNewsResearchAdapter(self.settings, **kwargs)
+        except TypeError:
+            # Some unit tests monkeypatch the adapter class with a minimal factory.
+            return GoogleNewsResearchAdapter(self.settings)
 
     def _parse_source_priority(self, value: str) -> list[str]:
         return [normalize_domain(item.strip()) for item in value.split(",") if item.strip()]
@@ -96,10 +138,16 @@ class ExternalResearchService:
         return (published.replace(tzinfo=None), relevance, priority)
 
     def _dedupe_key(self, item: ResearchItem) -> str:
-        title_key = re.sub(r"\W+", " ", (item.title or "").lower()).strip()
+        url_key = (item.url or "").strip().lower()
+        if url_key:
+            return url_key
+        title = (item.title or "").lower()
+        title = re.sub(r"\s+-\s+[^-]+$", "", title)
+        title = re.sub(r"\b(cập nhật|mới nhất|nóng|hot)\b", " ", title)
+        title_key = re.sub(r"\W+", " ", title).strip()
         if title_key:
             return title_key
-        return (item.url or "").strip().lower()
+        return ""
 
     def _source_priority_score(self, item: ResearchItem) -> int:
         url_domain = normalize_domain(item.url)
