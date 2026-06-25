@@ -1,9 +1,11 @@
 import asyncio
+import json
 
 from analyse.config.settings import Settings
 from analyse.research.vietstock_peer_adapter import PlaywrightVietstockPeerRenderer
 from analyse.research.vietstock_peer_adapter import VietstockPeerAdapter
 from analyse.services.stock_data_service import StockDataService
+from analyse.utils.playwright_safe import TargetClosedError
 
 
 def _overview_table(rows: str) -> str:
@@ -138,6 +140,229 @@ def test_peer_renderer_uses_safe_wait_strategy_and_default_tab(tmp_path):
 
     assert renderer._safe_wait_until("networkidle") == "domcontentloaded"
     assert renderer.settings.vietstock_peer_default_tab == "Tổng quan"
+
+
+def test_peer_playwright_renderer_cleanup_removes_listener_and_closes_objects(monkeypatch, tmp_path):
+    close_order = []
+
+    class FakePeerResponse:
+        url = "https://finance.vietstock.vn/Screener/FilterForRelationCompany"
+        headers = {"content-type": "application/json"}
+
+        async def text(self):
+            return '{"data":[{"stockCode":"BID","PE":10.2,"RSI":55.0}]}'
+
+    class FakeLocator:
+        def first(self):
+            return self
+
+        async def count(self):
+            return 0
+
+        async def is_visible(self, timeout):
+            return False
+
+        async def click(self, timeout):
+            raise AssertionError("click should not be reached")
+
+    class FakePage:
+        def __init__(self):
+            self.handler = None
+            self.removed = None
+            self.goto_calls = []
+
+        def on(self, event, handler):
+            self.handler = handler
+            self.event = event
+
+        def remove_listener(self, event, handler):
+            self.removed = (event, handler)
+
+        async def goto(self, url, *, wait_until, timeout):
+            self.goto_calls.append({"url": url, "wait_until": wait_until, "timeout": timeout})
+            self.handler(FakePeerResponse())
+
+        def locator(self, selector):
+            return FakeLocator()
+
+        async def wait_for_selector(self, selector, *, timeout):
+            return None
+
+        async def wait_for_timeout(self, timeout):
+            return None
+
+        async def content(self):
+            return VCB_SAME_INDUSTRY_HTML
+
+        async def evaluate(self, script):
+            return {"tables": [], "grids": []}
+
+        async def close(self):
+            close_order.append("page")
+
+    fake_page = FakePage()
+
+    class FakeContext:
+        async def new_page(self):
+            return fake_page
+
+        async def close(self):
+            close_order.append("context")
+
+    fake_context = FakeContext()
+
+    class FakeBrowser:
+        async def new_context(self, **kwargs):
+            return fake_context
+
+        async def close(self):
+            close_order.append("browser")
+
+    fake_browser = FakeBrowser()
+
+    class FakeChromium:
+        async def launch(self, **kwargs):
+            return fake_browser
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakePlaywrightContext:
+        async def __aenter__(self):
+            return FakePlaywright()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePlaywrightModule:
+        @staticmethod
+        def async_playwright():
+            return FakePlaywrightContext()
+
+    def fake_import(name):
+        if name == "playwright.async_api":
+            return FakePlaywrightModule
+        raise AssertionError(name)
+
+    monkeypatch.setattr("analyse.research.vietstock_peer_adapter.importlib.import_module", fake_import)
+    settings = _settings(
+        tmp_path,
+        VIETSTOCK_PEER_TIMEOUT_MS=77000,
+        VIETSTOCK_PEER_BROWSER_WAIT_UNTIL="load",
+        VIETSTOCK_PEER_BROWSER_EXTRA_WAIT_MS=0,
+    )
+    renderer = PlaywrightVietstockPeerRenderer(settings)
+
+    html, warnings = asyncio.run(
+        renderer._fetch_rendered_html_direct(
+            "https://finance.vietstock.vn/VCB/so-sanh-gia-co-phieu-cung-nganh.htm"
+        )
+    )
+
+    assert html is not None
+    assert warnings == []
+    assert "data-vietstock-peer-xhr" in html
+    assert fake_page.goto_calls == [
+        {
+            "url": "https://finance.vietstock.vn/VCB/so-sanh-gia-co-phieu-cung-nganh.htm",
+            "wait_until": "load",
+            "timeout": 77000,
+        }
+    ]
+    assert fake_page.removed == ("response", fake_page.handler)
+    assert close_order == ["page", "context", "browser"]
+
+
+def test_peer_playwright_renderer_target_closed_writes_scrubbed_debug_artifact(monkeypatch, tmp_path):
+    class FakePage:
+        def on(self, event, handler):
+            self.handler = handler
+
+        def remove_listener(self, event, handler):
+            self.removed = (event, handler)
+
+        async def goto(self, url, *, wait_until, timeout):
+            raise TargetClosedError("Target page closed Authorization: Bearer raw-secret api_key=raw-key")
+
+        async def content(self):
+            raise TargetClosedError("Target page, context or browser has been closed")
+
+        async def close(self):
+            raise TargetClosedError("already closed")
+
+    fake_page = FakePage()
+
+    class FakeContext:
+        async def new_page(self):
+            return fake_page
+
+        async def close(self):
+            raise TargetClosedError("already closed")
+
+    class FakeBrowser:
+        async def new_context(self, **kwargs):
+            return FakeContext()
+
+        async def close(self):
+            raise TargetClosedError("already closed")
+
+    class FakeChromium:
+        async def launch(self, **kwargs):
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakePlaywrightContext:
+        async def __aenter__(self):
+            return FakePlaywright()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePlaywrightModule:
+        @staticmethod
+        def async_playwright():
+            return FakePlaywrightContext()
+
+    def fake_import(name):
+        if name == "playwright.async_api":
+            return FakePlaywrightModule
+        raise AssertionError(name)
+
+    monkeypatch.setattr("analyse.research.vietstock_peer_adapter.importlib.import_module", fake_import)
+    settings = _settings(
+        tmp_path,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+        VIETSTOCK_DEBUG_SAVE_EXTRACTION_JSON=True,
+    )
+    renderer = PlaywrightVietstockPeerRenderer(settings)
+
+    html, warnings = asyncio.run(
+        renderer._fetch_rendered_html_direct(
+            "https://finance.vietstock.vn/VCB/so-sanh-gia-co-phieu-cung-nganh.htm?token=raw-token"
+        )
+    )
+
+    payload_path = tmp_path / "reports" / "debug" / "VCB_vietstock_peer_playwright_error.json"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert html is None
+    assert any("TargetClosedError" in warning for warning in warnings)
+    assert fake_page.removed == ("response", fake_page.handler)
+    assert payload["source"] == "Vietstock peer"
+    assert payload["error_type"] == "TargetClosedError"
+    assert payload["cleanup_completed"] is True
+    assert "raw-token" not in serialized
+    assert "raw-secret" not in serialized
+    assert "raw-key" not in serialized
+
+
+def test_parse_text_lines_remains_available_for_debug(tmp_path):
+    adapter = VietstockPeerAdapter(_settings(tmp_path), http_client=FakeHttpClient(""))
+
+    assert hasattr(adapter, "_parse_text_lines")
+    assert adapter._parse_text_lines("BID 42000 10.2 1.5 12", source_url="https://example.test") == []
 
 
 def test_cmg_overview_table_extracts_requested_peer_tickers_and_columns(tmp_path):

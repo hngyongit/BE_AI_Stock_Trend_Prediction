@@ -1,10 +1,12 @@
 import asyncio
+import json
 from pathlib import Path
 
 from analyse.config.settings import Settings
 from analyse.schemas.llm import LLMGenerateResult
 from analyse.schemas.report import AnalyseOneReportRequest
 from analyse.schemas.research import ExternalResearchContext, ResearchItem
+from analyse.services.ai_report_history_service import AiReportHistoryUnavailableError
 from analyse.services.report_service import ReportService
 from analyse.services.watchlist_service import WatchlistService
 
@@ -83,7 +85,7 @@ class FakeBackendClient:
         return {
             "data": {
                 "items": [
-                    {"stock": {"symbol": "FPT"}},
+                    {"watchlist_id": "watch-fpt", "stock": {"id": "stock-fpt", "symbol": "FPT", "market_code": "HOSE"}},
                     {"stock": {"symbol": "CMG"}},
                     {"stock": {"symbol": "MWG"}},
                     {"stock": {"symbol": "HPG"}},
@@ -91,6 +93,19 @@ class FakeBackendClient:
                     {"stock": {"symbol": "SSI"}},
                 ]
             }
+        }
+
+    async def get_current_user(self, *, token: str):
+        self.tokens.append(("current-user", token))
+        return {
+            "success": True,
+            "data": {
+                "id": "mongo-user-1",
+                "email": "user@example.com",
+                "full_name": "Nguyen Van A",
+                "role": "USER",
+                "plan": "FREE",
+            },
         }
 
     async def get_stock_detail(self, symbol: str, *, token: str):
@@ -299,6 +314,11 @@ class FakeResearchService:
         return ExternalResearchContext(enabled=True, status="success", items=[], flag_summary={})
 
 
+class FailIfCalledSourceBackedEnrichmentService:
+    async def enrich(self, **kwargs):
+        raise AssertionError("source-backed enrichment must not run before watchlist validation passes")
+
+
 class FakeResearchServiceWithItem:
     async def search(self, symbol: str, company: str | None = None):
         return ExternalResearchContext(
@@ -321,6 +341,45 @@ class FakeResearchServiceWithItem:
             flag_summary={"positive_flags": ["lợi nhuận tăng"], "catalyst_flags": ["cổ tức"]},
             source_statuses=[{"name": "CafeF", "status": "success", "items": 1}],
         )
+
+
+class FakeHistoryService:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def save_report_after_analysis(self, *, current_user, payload, report_response, matched_watchlist_item):
+        self.calls.append(
+            {
+                "mongo_user_id": current_user.mongo_user_id,
+                "symbol": payload.symbol,
+                "watchlist_id": matched_watchlist_item.get("watchlist_id") if isinstance(matched_watchlist_item, dict) else None,
+                "stock_id": matched_watchlist_item.get("stock_id") if isinstance(matched_watchlist_item, dict) else None,
+            }
+        )
+        report_response["data"]["history_id"] = "history-123"
+        return "history-123"
+
+
+class FailingHistoryService(FakeHistoryService):
+    def __init__(self, secret_db_url: str) -> None:
+        super().__init__()
+        self.secret_db_url = secret_db_url
+
+    async def save_report_after_analysis(self, *, current_user, payload, report_response, matched_watchlist_item):
+        self.calls.append(
+            {
+                "mongo_user_id": current_user.mongo_user_id,
+                "symbol": payload.symbol,
+                "watchlist_id": matched_watchlist_item.get("watchlist_id") if isinstance(matched_watchlist_item, dict) else None,
+                "stock_id": matched_watchlist_item.get("stock_id") if isinstance(matched_watchlist_item, dict) else None,
+            }
+        )
+        raise AiReportHistoryUnavailableError(f"SQL unavailable for {self.secret_db_url}")
+
+
+class FailIfCalledHistoryService:
+    async def save_report_after_analysis(self, **kwargs):
+        raise AssertionError("history service must not be called when history is disabled")
 
 
 class FakeLLMProvider:
@@ -346,6 +405,39 @@ class FakeLLMProvider:
         )
 
 
+class FakeLLMProviderWithUnsupportedNumeric(FakeLLMProvider):
+    async def generate_report_json(self, payload, schema=None):
+        return LLMGenerateResult(
+            provider=self.provider_name,
+            model=self.model,
+            status="success",
+            latency_ms=12,
+            data={
+                "strengths": ["Giá mục tiêu 125,000 VND có thể tạo upside mạnh."],
+                "system_decision": {"reasons": ["Điểm tổng 71/100 là dữ liệu nguồn; target 125000 VND cần kiểm chứng."]},
+                "action_plan": {
+                    "short_term": [
+                        {
+                            "action": "Theo dõi vùng giá 125000 VND.",
+                            "condition": "Chỉ nâng mức đánh giá nếu giá vượt 125000 VND.",
+                            "price_zone": 125000,
+                            "price_zone_note": "Vùng 125000 VND do mô hình nêu.",
+                            "position_size_note": "Không vượt quá 33% danh mục.",
+                            "risk_note": "Dừng lỗ 118000 VND nếu tín hiệu sai.",
+                            "source_basis": "LLM inference",
+                        }
+                    ],
+                    "medium_term": [],
+                    "watch_points": [],
+                    "risk_management": [],
+                },
+                "checklist": [
+                    {"label": "Kiểm tra xu hướng giá", "note": "Đối chiếu thanh khoản và dữ liệu nguồn.", "source_basis": "Dữ liệu hiện có"}
+                ],
+            },
+        )
+
+
 def test_watchlist_limits_to_five_symbols():
     service = WatchlistService(Settings(MAX_WATCHLIST_SYMBOLS=5))
     symbols = ["FPT", "CMG", "MWG", "HPG", "VCB", "SSI"]
@@ -360,16 +452,40 @@ def test_watchlist_normalizes_and_validates_symbol():
     assert symbol == "FPT"
 
 
+def test_watchlist_extracts_and_returns_matched_mongo_ids():
+    service = WatchlistService(Settings(MAX_WATCHLIST_SYMBOLS=5))
+    payload = {
+        "data": {
+            "items": [
+                {"watchlist_id": "watch-1", "stock": {"id": "stock-1", "symbol": "FPT", "market_code": "HOSE"}},
+                {"watchlist_id": "watch-2", "stock": {"id": "stock-2", "symbol": "VCB", "market_code": "HOSE"}},
+            ]
+        }
+    }
+
+    items = service.extract_items_from_backend_payload(payload)
+    matched = service.find_matching_item(" fpt ", requested_exchange="hose", allowed_items=items)
+
+    assert matched is not None
+    assert matched["symbol"] == "FPT"
+    assert matched["exchange"] == "HOSE"
+    assert matched["watchlist_id"] == "watch-1"
+    assert matched["stock_id"] == "stock-1"
+
+
 def test_symbol_outside_first_five_watchlist_returns_error(tmp_path):
     settings = Settings(ANALYSE_ONE_SYMBOL_ONLY=True, ENABLE_EXTERNAL_RESEARCH=False, REPORT_OUTPUT_DIR=str(tmp_path / "reports"))
     backend_client = FakeBackendClient()
     service = ReportService(settings=settings, backend_client=backend_client, research_service=FakeResearchService())
+    service.source_collection_coordinator.source_backed_enrichment_service = FailIfCalledSourceBackedEnrichmentService()
     request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "SSI", "scopeExchange": "HOSE"})
 
     result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
 
     assert result["code"] == 403
     assert result["error"]["type"] == "SYMBOL_NOT_IN_WATCHLIST"
+    assert ("analysis-data", "request-token") not in backend_client.tokens
+    assert ("stock-detail", "request-token") not in backend_client.tokens
 
 
 def test_report_service_requires_request_token(tmp_path):
@@ -404,6 +520,152 @@ def test_report_service_uses_requested_provider_and_model(monkeypatch, tmp_path)
     assert result["data"]["provider"]["model"] == "gemini-request"
     assert ("watchlists", "request-token") in backend_client.tokens
     assert ("analysis-data", "request-token") in backend_client.tokens
+
+
+def test_analyse_one_saves_history_when_enabled(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    settings = Settings(
+        ENABLE_AI_REPORT_HISTORY=True,
+        AI_REPORT_DB_URL="mssql+pyodbc://user:password@localhost/db",
+        ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_COMPANY_FALLBACK=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_PEER_FALLBACK=False,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    backend_client = FakeBackendClient()
+    history_service = FakeHistoryService()
+    service = ReportService(
+        settings=settings,
+        backend_client=backend_client,
+        research_service=FakeResearchService(),
+        history_service=history_service,
+    )
+    request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+
+    assert result["code"] == 200
+    assert result["data"]["history_id"] == "history-123"
+    assert ("current-user", "request-token") in backend_client.tokens
+    assert history_service.calls == [
+        {
+            "mongo_user_id": "mongo-user-1",
+            "symbol": "FPT",
+            "watchlist_id": "watch-fpt",
+            "stock_id": "stock-fpt",
+        }
+    ]
+
+
+def test_analyse_one_history_save_failure_non_blocking_still_returns_success(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    secret_db_url = "mssql+pyodbc://user:sql-secret@localhost/db"
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    settings = Settings(
+        ENABLE_AI_REPORT_HISTORY=True,
+        AI_REPORT_DB_URL=secret_db_url,
+        AI_REPORT_HISTORY_SAVE_FAILURE_POLICY="non_blocking",
+        ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_COMPANY_FALLBACK=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_PEER_FALLBACK=False,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    history_service = FailingHistoryService(secret_db_url)
+    service = ReportService(
+        settings=settings,
+        backend_client=FakeBackendClient(),
+        research_service=FakeResearchService(),
+        history_service=history_service,
+    )
+    request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+
+    body_text = json.dumps(result, ensure_ascii=False, default=str)
+    assert result["code"] == 200
+    assert result["data"]["history_status"] == "failed"
+    assert result["data"]["report_status"] == "success_with_warnings"
+    assert "history_id" not in result["data"]
+    assert result["data"]["warnings"].count("Báo cáo đã phân tích thành công nhưng chưa lưu được lịch sử.") == 1
+    assert history_service.calls
+    assert "sql-secret" not in body_text
+    assert secret_db_url not in body_text
+
+
+def test_analyse_one_history_save_failure_strict_returns_controlled_failure(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    secret_db_url = "mssql+pyodbc://user:sql-secret@localhost/db"
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    settings = Settings(
+        ENABLE_AI_REPORT_HISTORY=True,
+        AI_REPORT_DB_URL=secret_db_url,
+        AI_REPORT_HISTORY_SAVE_FAILURE_POLICY="strict",
+        ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_COMPANY_FALLBACK=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_PEER_FALLBACK=False,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    service = ReportService(
+        settings=settings,
+        backend_client=FakeBackendClient(),
+        research_service=FakeResearchService(),
+        history_service=FailingHistoryService(secret_db_url),
+    )
+    request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+
+    body_text = json.dumps(result, ensure_ascii=False, default=str)
+    assert result["code"] == 503
+    assert result["error"]["type"] == "HISTORY_SAVE_FAILED"
+    assert result["data"] is None
+    assert "sql-secret" not in body_text
+    assert secret_db_url not in body_text
+
+
+def test_analyse_one_history_disabled_sets_history_status_without_crash(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    backend_client = FakeBackendClient()
+    settings = Settings(
+        ENABLE_AI_REPORT_HISTORY=False,
+        ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_COMPANY_FALLBACK=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_PEER_FALLBACK=False,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    service = ReportService(
+        settings=settings,
+        backend_client=backend_client,
+        research_service=FakeResearchService(),
+        history_service=FailIfCalledHistoryService(),
+    )
+    request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+
+    assert result["code"] == 200
+    assert result["data"]["history_status"] == "disabled"
+    assert result["data"]["report_status"] != "failed"
+    assert "history_id" not in result["data"]
+    assert ("current-user", "request-token") not in backend_client.tokens
 
 
 def test_report_service_falls_back_to_env_model_when_request_model_missing(monkeypatch, tmp_path):
@@ -454,6 +716,51 @@ def test_llm_output_is_merged_without_overwriting_numeric_fields(monkeypatch, tm
     assert Path(markdown_report["output_path"]).exists()
     assert Path(html_report["output_path"]).exists()
     assert html_report["content"] is None
+
+
+def test_analyse_one_suppresses_unsupported_llm_exact_numeric_facts(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProviderWithUnsupportedNumeric(provider, model or settings.openai_model)
+
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    output_dir = tmp_path / "reports"
+    settings = Settings(
+        OPENAI_MODEL="gpt-env",
+        ENABLE_EXTERNAL_RESEARCH=False,
+        EXTERNAL_DATA_DEBUG_SAVE_EXTRACTION_JSON=True,
+        REPORT_OUTPUT_DIR=str(output_dir),
+    )
+    service = ReportService(settings=settings, backend_client=FakeBackendClient(), research_service=FakeResearchService())
+    request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+
+    assert set(result) == {"code", "message", "data"}
+    assert result["code"] == 200
+    data = result["data"]
+    summary = data["summary"]
+    serialized_summary = json.dumps(
+        {
+            "strengths": summary.get("strengths"),
+            "action_plan": summary.get("action_plan"),
+            "investment_plan": summary.get("investment_plan"),
+            "report_presentation": summary.get("report_presentation"),
+        },
+        ensure_ascii=False,
+    )
+    assert summary["latest_market"]["close_price"] == 100.0
+    assert "Theo dõi" in serialized_summary
+    assert "125000" not in serialized_summary
+    assert "125,000" not in serialized_summary
+    assert "118000" not in serialized_summary
+    assert "33%" not in serialized_summary
+    assert any("số liệu định lượng do mô hình tạo ra" in warning.lower() for warning in data["warnings"])
+
+    artifact = output_dir / "debug" / "FPT_numeric_fact_validation.json"
+    assert artifact.exists()
+    debug_text = artifact.read_text(encoding="utf-8")
+    assert "125000" not in debug_text
+    assert "numeric_fact_validation" not in debug_text or "issue_count" in debug_text
 
 
 def test_watchlist_401_returns_auth_error(monkeypatch, tmp_path):

@@ -21,13 +21,12 @@ from analyse.utils.datetime_utils import now_iso
 from analyse.utils.playwright_safe import PlaywrightTimeoutError
 from analyse.utils.playwright_safe import TargetClosedError
 from analyse.utils.playwright_safe import cancel_pending_tasks_safely
-from analyse.utils.playwright_safe import close_playwright_objects_safely
+from analyse.utils.playwright_safe import cleanup_playwright_runtime_safely
 from analyse.utils.playwright_safe import gather_safely
 from analyse.utils.playwright_safe import is_playwright_timeout_error
 from analyse.utils.playwright_safe import is_target_closed_error
-from analyse.utils.playwright_safe import remove_playwright_listener_safely
 from analyse.utils.playwright_safe import safe_playwright_error_message
-from analyse.utils.playwright_safe import save_playwright_error_debug
+from analyse.utils.debug_scrub import scrub_debug_payload, scrub_debug_text
 from analyse.utils.symbol_utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
@@ -215,23 +214,20 @@ class PlaywrightCafeFCompanyRenderer:
             logger.warning("[%s] Playwright crawler failed safely: %s", label, exc, exc_info=True)
             return None, [f"CafeF company rendering failed: {exc.__class__.__name__}: {self._safe_error_message(exc)}"]
         finally:
-            if response_handler is not None:
-                remove_playwright_listener_safely(page, "response", response_handler, label=label)
-            logger.info("[%s] pending tasks count=%s", label, len([task for task in pending_tasks if not task.done()]))
-            await cancel_pending_tasks_safely(pending_tasks, label=label)
-            await close_playwright_objects_safely(page=page, context=context, browser=browser, label=label)
-            if debug_error is not None:
-                save_playwright_error_debug(
-                    self.settings,
-                    source="CafeF thông tin doanh nghiệp",
-                    url=url,
-                    slug="cafef_company",
-                    error=debug_error,
-                    phase=debug_phase,
-                    pending_tasks_count=len([task for task in pending_tasks if not task.done()]),
-                    cleanup_completed=True,
-                )
-            logger.info("[%s] cleanup completed", label)
+            await cleanup_playwright_runtime_safely(
+                page=page,
+                context=context,
+                browser=browser,
+                pending_tasks=pending_tasks,
+                response_handler=response_handler,
+                label=label,
+                debug_settings=self.settings,
+                debug_source="CafeF thông tin doanh nghiệp",
+                debug_url=url,
+                debug_slug="cafef_company",
+                debug_error=debug_error,
+                debug_phase=debug_phase,
+            )
 
     async def _wait_for_content(self, page: Any) -> None:
         for selector in ("table", "text=Ban lãnh đạo", "text=Hồ sơ công ty", "text=Ngành nghề", "text=Sở hữu"):
@@ -1079,7 +1075,7 @@ class CafeFCompanyAdapter:
         try:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f"{normalize_symbol(symbol)}_cafef_company_rendered.html").write_text(html_text, encoding="utf-8")
+            (debug_dir / f"{normalize_symbol(symbol)}_cafef_company_rendered.html").write_text(scrub_debug_text(html_text), encoding="utf-8")
         except Exception:
             return
 
@@ -1089,7 +1085,7 @@ class CafeFCompanyAdapter:
         try:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f"{normalize_symbol(symbol)}_cafef_company_raw.html").write_text(html_text or "", encoding="utf-8")
+            (debug_dir / f"{normalize_symbol(symbol)}_cafef_company_raw.html").write_text(scrub_debug_text(html_text or ""), encoding="utf-8")
         except Exception:
             return
 
@@ -1146,16 +1142,17 @@ class CafeFCompanyAdapter:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
             (debug_dir / f"{normalize_symbol(symbol)}_cafef_company_tables.json").write_text(
-                json.dumps(tables_payload, ensure_ascii=False, indent=2),
+                json.dumps(scrub_debug_payload(tables_payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             (debug_dir / f"{normalize_symbol(symbol)}_cafef_company_extraction.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(scrub_debug_payload(payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             (debug_dir / f"{normalize_symbol(symbol)}_leadership_ownership_normalized.json").write_text(
                 json.dumps(
-                    {
+                    scrub_debug_payload(
+                        {
                         "symbol": normalize_symbol(symbol),
                         "source_url": source_url,
                         "leadership": result.get("leadership") or [],
@@ -1163,7 +1160,8 @@ class CafeFCompanyAdapter:
                         "status": result.get("status"),
                         "accepted_fields": result.get("accepted_fields") or [],
                         "rejected_fields": result.get("rejected_fields") or [],
-                    },
+                        }
+                    ),
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -1224,11 +1222,11 @@ class CafeFCompanyAdapter:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
             (debug_dir / f"{normalize_symbol(symbol)}_cafef_company_url.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(scrub_debug_payload(payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             (debug_dir / f"{normalize_symbol(symbol)}_cafef_company_request.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(scrub_debug_payload(payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception:

@@ -139,3 +139,20 @@ def test_backend_client_watchlists_uses_request_token_not_env_token():
     assert call["url"] == "http://localhost:5000/api/watchlists"
     assert call["headers"]["Authorization"] == "Bearer request-token"
     assert "env-token" not in str(call)
+
+
+def test_backend_client_get_current_user_uses_configured_endpoint_and_request_token():
+    fake_http = FakeHttpClient()
+    client = BackendClient(
+        Settings(BACKEND_API_BASE_URL="http://localhost:5000/api", BACKEND_CURRENT_USER_ENDPOINT="/api/users/me"),
+        http_client=fake_http,
+    )
+
+    import asyncio
+
+    asyncio.run(client.get_current_user(token="request-token"))
+
+    call = fake_http.calls[0]
+    assert call["url"] == "http://localhost:5000/api/users/me"
+    assert call["headers"]["Authorization"] == "Bearer request-token"
+    assert "request-token" not in str(client.sanitized_diagnostics())

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import Any
 
 from analyse.config.settings import Settings, get_settings
@@ -9,9 +11,11 @@ from analyse.schemas.research import ExternalResearchContext
 from analyse.services.presentation_contract import display_percent_value
 from analyse.services.presentation_contract import normalize_percent_score
 from analyse.services.presentation_contract import normalize_score_0_100
+from analyse.services.report_presentation_normalizer import ReportPresentationNormalizer
 from analyse.services.scoring_service import ScoringService
 from analyse.services.stock_data_service import StockDataService
 from analyse.utils.datetime_utils import format_datetime_vi
+from analyse.utils.debug_scrub import scrub_debug_payload
 from analyse.utils.symbol_utils import normalize_symbol
 
 
@@ -27,6 +31,7 @@ class SummaryService:
         self.settings = settings or get_settings()
         self.stock_data_service = stock_data_service or StockDataService()
         self.scoring_service = scoring_service or ScoringService()
+        self.presentation_normalizer = ReportPresentationNormalizer(self.stock_data_service, self.settings)
 
     def build_summary(
         self,
@@ -47,6 +52,14 @@ class SummaryService:
         full_financial_periods = self.stock_data_service.full_financial_periods(valid_financial_periods)
         ratio_financial_periods = self.stock_data_service.ratio_financial_periods(valid_financial_periods)
         financial_periods = full_financial_periods or valid_financial_periods
+        financials_merged = self._dict(normalized.get("financials_merged")) or {
+            "periods": financial_periods,
+            "source": financials.get("source"),
+        }
+        financial_source_contributions = self._list(normalized.get("financial_source_contributions"))
+        financial_conflicts = self._list(normalized.get("financial_conflicts"))
+        cafef_financial_contribution = self._dict(normalized.get("cafef_financial_contribution"))
+        financial_backfill_report = self._dict(normalized.get("financial_backfill_report"))
         financial_balance = self._dict(normalized.get("financial_balance"))
         data_quality = self._dict(normalized.get("data_quality"))
         source_success = self._dict(normalized.get("_source_success"))
@@ -119,7 +132,7 @@ class SummaryService:
             },
             "latest_market": latest_market,
             "price_history": price_history,
-            "momentum": self._build_momentum(price_history),
+            "momentum": self._build_momentum(price_history, normalized),
             "bctc_3q": {
                 "has_bctc": bool(full_financial_periods),
                 "has_financial_ratios": bool(ratio_financial_periods),
@@ -127,9 +140,18 @@ class SummaryService:
                 "total_periods_available": len(full_financial_periods),
                 "total_ratio_periods_available": len(ratio_financial_periods),
                 "source": financials.get("source") or data_quality.get("financial_source") or data_quality.get("source"),
+                "source_contributions": financial_source_contributions,
+                "conflicts": financial_conflicts,
+                "cafef_financial_contribution": cafef_financial_contribution,
                 "data_quality_notes": user_data_notes,
                 "technical_data_quality_notes": technical_notes,
             },
+            "financials_merged": financials_merged,
+            "financial_source_contributions": financial_source_contributions,
+            "financial_conflicts": financial_conflicts,
+            "financial_cross_checks": self._list(normalized.get("financial_cross_checks")),
+            "cafef_financial_contribution": cafef_financial_contribution,
+            "financial_backfill_report": financial_backfill_report,
             "financial_balance": financial_balance,
             "company_overview": company_overview,
             "hose_market_context": hose_market_context,
@@ -148,6 +170,7 @@ class SummaryService:
             "system_decision": self._build_system_decision(scores, data_quality, bool(full_financial_periods), hose_market_context),
             "investment_plan": {"decision": {}, "reference_levels": {}, "position_sizing": {}, "action_table": []},
             "warnings": self._dedupe([*(warnings or []), *self._string_list(data_quality.get("warnings"))]),
+            "source_backed_enrichment": self._source_backed_enrichment_policy(),
         }
         summary["report_presentation"] = self._build_report_presentation(
             summary=summary,
@@ -155,7 +178,59 @@ class SummaryService:
             user_data_notes=user_data_notes,
             research_context=research_context,
         )
+        self.save_report_presentation_debug_artifacts(symbol, summary)
         return summary
+
+    def refresh_report_presentation(
+        self,
+        summary: dict[str, Any],
+        *,
+        research_context: ExternalResearchContext | None = None,
+        final_response: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        refreshed = dict(summary)
+        technical_notes = self._string_list(refreshed.get("technical_data_quality_notes"))
+        user_data_notes = self._string_list(refreshed.get("data_quality_notes"))
+        refreshed["report_presentation"] = self._build_report_presentation(
+            summary=refreshed,
+            technical_notes=technical_notes,
+            user_data_notes=user_data_notes,
+            research_context=research_context,
+        )
+        self.save_report_presentation_debug_artifacts(refreshed.get("symbol") or "", refreshed, final_response=final_response)
+        return refreshed
+
+    def save_report_presentation_debug_artifacts(
+        self,
+        symbol: str,
+        summary: dict[str, Any],
+        *,
+        final_response: dict[str, Any] | None = None,
+    ) -> None:
+        if not (self.settings.external_data_debug_save_extraction_json or self.settings.vietstock_debug_save_extraction_json):
+            return
+        try:
+            debug_dir = Path(self.settings.report_output_dir) / "debug"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            presentation = self._dict(summary.get("report_presentation"))
+            payloads = self.presentation_normalizer.build_debug_payloads(summary, presentation, final_response)
+            clean_symbol = str(symbol or summary.get("symbol") or "UNKNOWN").strip().upper() or "UNKNOWN"
+            file_map = {
+                "quick_overview": f"{clean_symbol}_quick_overview_normalized.json",
+                "market_context": f"{clean_symbol}_market_context_normalized.json",
+                "financial_table": f"{clean_symbol}_financial_table_normalized.json",
+                "action_scenario_checklist": f"{clean_symbol}_action_scenario_checklist_normalized.json",
+                "data_coverage_sources": f"{clean_symbol}_data_coverage_sources_normalized.json",
+                "audit": f"{clean_symbol}_report_presentation_mapping_audit.json",
+            }
+            for key, filename in file_map.items():
+                payload = payloads.get(key)
+                (debug_dir / filename).write_text(
+                    json.dumps(self._scrub_debug_payload(payload), ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8",
+                )
+        except Exception:
+            return
 
     def _source_loaded(self, source_success: dict[str, Any], key: str, *, fallback: bool) -> bool:
         if key in source_success:
@@ -204,9 +279,21 @@ class SummaryService:
                 "matchedVolume",
                 "total_volume",
                 "totalValue",
+                "totalTradingValue",
+                "total_trading_value",
                 "total_value",
                 "trading_value_billion",
                 "tradingValueBillion",
+                "trading_value",
+                "tradingValue",
+                "market_value",
+                "marketValue",
+                "value_billion",
+                "valueBillion",
+                "liquidity_value",
+                "liquidityValue",
+                "matched_value",
+                "matchedValue",
                 "regime",
                 "status",
                 "market_health_score",
@@ -226,28 +313,177 @@ class SummaryService:
             return market_general_context
         return {}
 
-    def _build_momentum(self, price_history: Any) -> dict[str, Any]:
+    def _build_momentum(self, price_history: Any, source: dict[str, Any] | None = None) -> dict[str, Any]:
+        explicit_change = self._explicit_chart_period_change(source or {})
         if not isinstance(price_history, list) or len(price_history) < 2:
-            return {}
+            if explicit_change is not None:
+                return {
+                    "change_pct": explicit_change,
+                    "chart_period_change_pct": explicit_change,
+                    "chart_period_label": self.settings.backend_analysis_data_chart_range.upper(),
+                    "period_points": len(price_history) if isinstance(price_history, list) else 0,
+                    "chart_points": len(price_history) if isinstance(price_history, list) else 0,
+                    "source": "explicit_backend_period_change",
+                }
+            return {"missing_reason": "Chưa đủ 2 điểm giá hợp lệ"}
 
-        closes: list[float] = []
-        for item in price_history:
+        valid_points: list[dict[str, Any]] = []
+        for item in self._sort_price_history(price_history):
             if not isinstance(item, dict):
                 continue
-            close = item.get("close") or item.get("close_price")
-            if isinstance(close, (int, float)):
-                closes.append(float(close))
+            close = self._price_close_value(item)
+            if close is not None:
+                valid_points.append({**item, "_close": close})
 
-        if len(closes) < 2 or closes[0] == 0:
-            return {}
+        if len(valid_points) < 2:
+            if explicit_change is not None:
+                return {
+                    "change_pct": explicit_change,
+                    "chart_period_change_pct": explicit_change,
+                    "chart_period_label": self.settings.backend_analysis_data_chart_range.upper(),
+                    "period_points": len(valid_points),
+                    "chart_points": len(valid_points),
+                    "source": "explicit_backend_period_change",
+                }
+            return {"period_points": len(valid_points), "chart_points": len(valid_points), "missing_reason": "Chưa đủ 2 điểm giá hợp lệ"}
 
-        change_pct = round(((closes[-1] - closes[0]) / closes[0]) * 100, 2)
+        first_close = valid_points[0]["_close"]
+        last_close = valid_points[-1]["_close"]
+        if first_close <= 0:
+            if explicit_change is not None:
+                return {
+                    "change_pct": explicit_change,
+                    "chart_period_change_pct": explicit_change,
+                    "chart_period_label": self.settings.backend_analysis_data_chart_range.upper(),
+                    "period_points": len(valid_points),
+                    "chart_points": len(valid_points),
+                    "first_close": first_close,
+                    "last_close": last_close,
+                    "chart_period_start_price": first_close,
+                    "chart_period_end_price": last_close,
+                    "source": "explicit_backend_period_change",
+                }
+            return {
+                "period_points": len(valid_points),
+                "chart_points": len(valid_points),
+                "first_close": first_close,
+                "last_close": last_close,
+                "chart_period_start_price": first_close,
+                "chart_period_end_price": last_close,
+                "missing_reason": "Giá đầu kỳ chart không hợp lệ để tính biến động",
+            }
+
+        calculated_change = round(((last_close - first_close) / first_close) * 100, 2)
+        change_pct = explicit_change if explicit_change is not None else calculated_change
         return {
-            "period_points": len(closes),
-            "first_close": closes[0],
-            "last_close": closes[-1],
+            "period_points": len(valid_points),
+            "chart_points": len(valid_points),
+            "first_close": first_close,
+            "last_close": last_close,
+            "chart_period_start_price": first_close,
+            "chart_period_end_price": last_close,
             "change_pct": change_pct,
+            "chart_period_change_pct": change_pct,
+            "calculated_change_pct": calculated_change,
+            "chart_period_label": self.settings.backend_analysis_data_chart_range.upper(),
+            "source": "explicit_backend_period_change" if explicit_change is not None else "price_history",
         }
+
+    def _explicit_chart_period_change(self, source: dict[str, Any]) -> float | None:
+        candidates: list[dict[str, Any]] = []
+        raw = self._dict(source.get("raw"))
+        for value in (
+            source,
+            raw,
+            self._dict(source.get("chart")),
+            self._dict(source.get("chart_data")),
+            self._dict(source.get("chartData")),
+            self._dict(raw.get("chart")),
+            self._dict(raw.get("chart_data")),
+            self._dict(raw.get("chartData")),
+            self._dict(raw.get("price_history_summary")),
+            self._dict(raw.get("priceHistorySummary")),
+        ):
+            if value and value not in candidates:
+                candidates.append(value)
+
+        for item in candidates:
+            for key in (
+                "chart_period_change_pct",
+                "chartPeriodChangePct",
+                "period_change_pct",
+                "periodChangePct",
+                "period_return_pct",
+                "periodReturnPct",
+                "chart_return_pct",
+                "chartReturnPct",
+                "chart_period_return",
+                "chartPeriodReturn",
+                "chart_return",
+                "chartReturn",
+                "period_change",
+                "periodChange",
+            ):
+                if key not in item:
+                    continue
+                value = self._number_value(item.get(key))
+                if value is None:
+                    continue
+                if abs(value) <= 1 and "ratio" in key.lower():
+                    value *= 100
+                return round(value, 2)
+        return None
+
+    def _sort_price_history(self, price_history: list[Any]) -> list[Any]:
+        indexed = list(enumerate(price_history))
+
+        def sort_key(item: tuple[int, Any]) -> tuple[int, str, int]:
+            index, value = item
+            if not isinstance(value, dict):
+                return (1, "", index)
+            raw_date = (
+                value.get("date")
+                or value.get("time")
+                or value.get("trading_date")
+                or value.get("tradingDate")
+                or value.get("time_id")
+                or value.get("timeId")
+            )
+            if raw_date in (None, ""):
+                return (1, "", index)
+            return (0, str(raw_date), index)
+
+        return [value for _, value in sorted(indexed, key=sort_key)]
+
+    def _price_close_value(self, item: dict[str, Any]) -> float | None:
+        for key in (
+            "close",
+            "c",
+            "close_price",
+            "closePrice",
+            "close_value",
+            "closeValue",
+            "last_price",
+            "lastPrice",
+            "matched_price",
+            "matchedPrice",
+            "price",
+            "reference",
+            "reference_price",
+            "referencePrice",
+            "ref_price",
+            "refPrice",
+        ):
+            value = item.get(key)
+            if value in (None, "") or isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                return float(value)
+            try:
+                return float(str(value).replace(",", "").strip())
+            except ValueError:
+                continue
+        return None
 
     def _build_data_quality_notes(self, data_quality: dict[str, Any], periods: list[dict[str, Any]], warnings: list[str] | None) -> list[str]:
         notes: list[str] = []
@@ -330,7 +566,7 @@ class SummaryService:
         research_risk_notes = self._research_thesis_notes(research_insights, "risks")
         confidence_score = normalize_percent_score(scores.get("score_confidence"))
 
-        return {
+        presentation = {
             "executive_summary": {
                 "status": decision.get("status") or "CHƯA ĐỦ DỮ LIỆU ĐỂ KẾT LUẬN",
                 "main_thesis": self._build_main_thesis(summary),
@@ -352,6 +588,10 @@ class SummaryService:
             "peer_note": self._peer_note(peers),
             "reference_candidates": self._reference_candidates(summary),
             "research_insights": research_insights,
+            "executive_forecast": self._dict(summary.get("executive_forecast")),
+            "quantitative_signal_summary": self._dict(summary.get("quantitative_signal_summary")),
+            "risk_map": self._list(summary.get("risk_map")),
+            "evidence_table": self._list(summary.get("evidence_table")),
             "score_cards": self._score_cards(scores, summary),
             "roadmap": self._roadmap(summary),
             "coverage_rows": self._coverage_rows(summary),
@@ -370,6 +610,7 @@ class SummaryService:
                 "data_confidence_display": display_percent_value(scores.get("score_confidence")),
             },
         }
+        return self.presentation_normalizer.normalize(summary, presentation)
 
     def _build_main_thesis(self, summary: dict[str, Any]) -> str:
         scores = self._dict(summary.get("scores"))
@@ -523,6 +764,23 @@ class SummaryService:
             return "CafeF thông tin doanh nghiệp"
         return source
 
+    def _source_backed_enrichment_policy(self) -> dict[str, Any]:
+        return {
+            "source_backed_research_enabled": bool(self.settings.enable_source_backed_research),
+            "deep_research_crawl_enabled": bool(self.settings.enable_deep_research_crawl),
+            "enabled": bool(self.settings.enable_source_backed_missing_field_enrichment),
+            "allowed_sources": self.settings.missing_field_enrichment_allowed_source_list,
+            "timeout_ms": self.settings.missing_field_enrichment_timeout_ms,
+            "max_attempts": self.settings.missing_field_enrichment_max_attempts,
+            "policy": self.settings.report_missing_value_policy,
+            "numeric_facts_require_source": bool(self.settings.report_require_source_for_numeric_facts),
+            "model_inference_for_qualitative_fields": bool(self.settings.report_allow_model_inference_for_qualitative_fields),
+            "show_missing_reason": bool(self.settings.report_show_missing_reason),
+            "safe_action_fallback": bool(self.settings.report_allow_safe_action_fallback),
+            "safe_scenario_fallback": bool(self.settings.report_allow_safe_scenario_fallback),
+            "safe_checklist_fallback": bool(self.settings.report_allow_safe_checklist_fallback),
+        }
+
     def _normalize_market_context(self, hose_market_context: dict[str, Any], market_general_context: dict[str, Any]) -> dict[str, Any]:
         candidates = self._market_context_candidates(hose_market_context, market_general_context)
         raw_keys_found = sorted({key for item in candidates for key in item.keys()})
@@ -558,10 +816,18 @@ class SummaryService:
             "tradingValueBillion",
             "total_value_billion",
             "totalValueBillion",
+            "total_trading_value",
+            "totalTradingValue",
             "trading_value",
             "tradingValue",
             "total_value",
             "totalValue",
+            "market_value",
+            "marketValue",
+            "value_billion",
+            "valueBillion",
+            "liquidity_value",
+            "liquidityValue",
             "matchedValue",
             "matched_value",
         )
@@ -725,7 +991,23 @@ class SummaryService:
         index_value = self._first_value(market, "index_value", "vnindex", "close_index", "index", "value")
         change_pct = self._first_value(market, "change_percent", "changePercent")
         volume = self._first_value(market, "liquidity", "total_volume", "totalVolume")
-        value = self._first_value(market, "trading_value_billion", "total_value", "totalValue")
+        value = self._first_value(
+            market,
+            "trading_value_billion",
+            "tradingValueBillion",
+            "total_value",
+            "totalValue",
+            "totalTradingValue",
+            "total_trading_value",
+            "market_value",
+            "marketValue",
+            "value_billion",
+            "valueBillion",
+            "liquidity_value",
+            "liquidityValue",
+            "matched_value",
+            "matchedValue",
+        )
         regime = self._text(market.get("status") or market.get("market_health_label") or market.get("regime"), "Trung tính")
         regime_score = self._first_value(market, "market_health_score", "regime_score", "regimeScore")
         score_direction = self._first_value(market, "score_direction", "regime_score_direction", "scoreDirection")
@@ -1445,9 +1727,9 @@ class SummaryService:
             return self._source_display(source)
         text = " ".join(self._string_list(summary.get("data_quality_notes")) + self._string_list(summary.get("technical_data_quality_notes"))).lower()
         if "vietstock finance" in text:
-            return "Vietstock Finance"
+            return "Vietstock Finance BCTC"
         if "cafef" in text:
-            return "CafeF"
+            return "CafeF tài chính"
         if self._dict(summary.get("data_coverage")).get("analysis_data_loaded"):
             return "dữ liệu hệ thống đã xác thực"
         return "dữ liệu đã xác thực"
@@ -1517,7 +1799,7 @@ class SummaryService:
     def _format_trading_value_billion(self, value: Any) -> str:
         if not isinstance(value, (int, float)):
             return "Chưa xác minh"
-        return f"{value:,.1f} tỷ đồng"
+        return f"{value:,.1f}".replace(",", "_").replace(".", ",").replace("_", ".") + " tỷ đồng"
 
     def _market_regime_label(self, value: Any) -> str:
         text = str(value or "").strip().lower()
@@ -1553,17 +1835,25 @@ class SummaryService:
     def _source_display(self, value: Any) -> str:
         text = str(value or "").strip()
         mapping = {
-            "vietstock": "Vietstock",
-            "vietstock_via_google_news_rss": "Vietstock",
-            "cafef": "CafeF",
+            "vietstock": "Vietstock Finance BCTC",
+            "vietstock finance": "Vietstock Finance BCTC",
+            "vietstock finance bctt": "Vietstock Finance BCTC",
+            "vietstock finance bctc": "Vietstock Finance BCTC",
+            "vietstock_via_google_news_rss": "Vietstock qua Google News",
+            "cafef": "CafeF thông tin doanh nghiệp",
             "cafef company overview": "CafeF thông tin doanh nghiệp",
             "cafef thông tin doanh nghiệp": "CafeF thông tin doanh nghiệp",
-            "cafef_via_google_news_rss": "CafeF",
+            "cafef bctc": "CafeF tài chính",
+            "cafef tài chính": "CafeF tài chính",
+            "cafef_via_google_news_rss": "CafeF qua Google News",
             "google_news_rss": "Google News",
             "google news rss": "Google News",
             "mongo:test": "Dữ liệu nội bộ",
         }
         return mapping.get(text.lower(), text or "Chưa xác minh")
+
+    def _scrub_debug_payload(self, value: Any) -> Any:
+        return scrub_debug_payload(value)
 
     def _dict(self, value: Any) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}

@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     )
     backend_api_timeout_ms: int = Field(default=30000, alias="BACKEND_API_TIMEOUT_MS")
     backend_api_verify_ssl: bool = Field(default=True, alias="BACKEND_API_VERIFY_SSL")
+    # Legacy compatibility only: analyse-one must receive the current user token
+    # through the request Authorization header, not from this environment value.
     backend_api_token: str | None = Field(default=None, alias="BACKEND_API_TOKEN")
     backend_api_auth_scheme: str = Field(default="Bearer", alias="BACKEND_API_AUTH_SCHEME")
     backend_use_analysis_data_endpoint: bool = Field(default=True, alias="BACKEND_USE_ANALYSIS_DATA_ENDPOINT")
@@ -40,10 +42,17 @@ class Settings(BaseSettings):
     backend_analysis_data_include_market_context: bool = Field(default=True, alias="BACKEND_ANALYSIS_DATA_INCLUDE_MARKET_CONTEXT")
     backend_watchlist_endpoint: str = Field(default="/api/watchlists", alias="BACKEND_WATCHLIST_ENDPOINT")
     backend_watchlist_required: bool = Field(default=False, alias="BACKEND_WATCHLIST_REQUIRED")
+    backend_current_user_endpoint: str = Field(default="/api/users/me", alias="BACKEND_CURRENT_USER_ENDPOINT")
     backend_stock_detail_endpoint: str = Field(default="/api/stocks/{symbol}", alias="BACKEND_STOCK_DETAIL_ENDPOINT")
     backend_stock_chart_endpoint: str = Field(default="/api/stocks/{symbol}/chart", alias="BACKEND_STOCK_CHART_ENDPOINT")
 
+    enable_ai_report_history: bool = Field(default=False, alias="ENABLE_AI_REPORT_HISTORY")
+    ai_report_db_url: str | None = Field(default=None, alias="AI_REPORT_DB_URL")
+    ai_report_history_save_failure_policy: str = Field(default="non_blocking", alias="AI_REPORT_HISTORY_SAVE_FAILURE_POLICY")
+
     report_output_dir: str = Field(default="reports", alias="REPORT_OUTPUT_DIR")
+    # REPORT_RENDER_* are legacy aliases kept for older deployments; REPORT_WRITE_*
+    # are the preferred names because the flag controls file writes.
     report_write_markdown: bool = Field(default=True, validation_alias=AliasChoices("REPORT_RENDER_MARKDOWN", "REPORT_WRITE_MARKDOWN"))
     report_write_html: bool = Field(default=True, validation_alias=AliasChoices("REPORT_RENDER_HTML", "REPORT_WRITE_HTML"))
     report_include_markdown_content_in_response: bool = Field(default=True, alias="REPORT_INCLUDE_MARKDOWN_CONTENT_IN_RESPONSE")
@@ -76,9 +85,31 @@ class Settings(BaseSettings):
     research_google_news_rss_enabled: bool = Field(default=True, alias="RESEARCH_GOOGLE_NEWS_RSS_ENABLED")
     research_max_article_age_days: int = Field(default=730, alias="RESEARCH_MAX_ARTICLE_AGE_DAYS")
     research_source_priority: str = Field(
-        default="vietstock.vn,cafef.vn,tinnhanhchungkhoan.vn,vneconomy.vn,bnews.vn",
+        default="vietstock.vn,cafef.vn,tinnhanhchungkhoan.vn,vneconomy.vn,bnews.vn,vietnambiz.vn,ndh.vn,fireant.vn,stockbiz.vn",
         alias="RESEARCH_SOURCE_PRIORITY",
     )
+    research_official_source_priority: str = Field(default="hsx.vn,hnx.vn,ssc.gov.vn", alias="RESEARCH_OFFICIAL_SOURCE_PRIORITY")
+
+    enable_source_backed_research: bool = Field(default=True, alias="ENABLE_SOURCE_BACKED_RESEARCH")
+    enable_deep_research_crawl: bool = Field(default=True, alias="ENABLE_DEEP_RESEARCH_CRAWL")
+    source_backed_research_timeout_ms: int = Field(default=45000, alias="SOURCE_BACKED_RESEARCH_TIMEOUT_MS")
+    source_backed_research_max_articles: int = Field(default=20, alias="SOURCE_BACKED_RESEARCH_MAX_ARTICLES")
+    source_backed_research_max_sources_per_symbol: int = Field(default=12, alias="SOURCE_BACKED_RESEARCH_MAX_SOURCES_PER_SYMBOL")
+    source_backed_research_max_crawl_depth: int = Field(default=1, alias="SOURCE_BACKED_RESEARCH_MAX_CRAWL_DEPTH")
+    source_backed_research_cache_ttl_seconds: int = Field(default=21600, alias="SOURCE_BACKED_RESEARCH_CACHE_TTL_SECONDS")
+    source_backed_research_require_source_for_numeric_facts: bool = Field(default=True, alias="SOURCE_BACKED_RESEARCH_REQUIRE_SOURCE_FOR_NUMERIC_FACTS")
+    source_backed_research_article_body_max_chars: int = Field(default=4000, alias="SOURCE_BACKED_RESEARCH_ARTICLE_BODY_MAX_CHARS")
+
+    google_news_rss_max_items: int = Field(default=15, alias="GOOGLE_NEWS_RSS_MAX_ITEMS")
+    google_news_rss_language: str = Field(default="vi", alias="GOOGLE_NEWS_RSS_LANGUAGE")
+    google_news_rss_country: str = Field(default="VN", alias="GOOGLE_NEWS_RSS_COUNTRY")
+
+    enable_forecast_scenarios: bool = Field(default=True, alias="ENABLE_FORECAST_SCENARIOS")
+    forecast_time_horizons: str = Field(default="short_term,base_term,medium_term", alias="FORECAST_TIME_HORIZONS")
+    forecast_scenario_count: int = Field(default=3, alias="FORECAST_SCENARIO_COUNT")
+    forecast_require_trigger_and_invalidation: bool = Field(default=True, alias="FORECAST_REQUIRE_TRIGGER_AND_INVALIDATION")
+    forecast_allow_probabilistic_language: bool = Field(default=True, alias="FORECAST_ALLOW_PROBABILISTIC_LANGUAGE")
+    forecast_default_probability_method: str = Field(default="score_weighted", alias="FORECAST_DEFAULT_PROBABILITY_METHOD")
 
     enable_cafef_company_fallback: bool = Field(default=True, alias="ENABLE_CAFEF_COMPANY_FALLBACK")
     cafef_company_url_template: str = Field(
@@ -100,6 +131,18 @@ class Settings(BaseSettings):
     cafef_financial_unit: str = Field(default="Tỷ đồng", alias="CAFEF_FINANCIAL_UNIT")
     cafef_financial_use_browser_fallback: bool = Field(default=True, alias="CAFEF_FINANCIAL_USE_BROWSER_FALLBACK")
 
+    enable_financial_source_merge: bool = Field(default=True, alias="ENABLE_FINANCIAL_SOURCE_MERGE")
+    financial_source_priority: str = Field(
+        default="backend_analysis_data,vietstock_bctc,cafef_financial",
+        alias="FINANCIAL_SOURCE_PRIORITY",
+    )
+    financial_allow_supplementary_backfill: bool = Field(default=True, alias="FINANCIAL_ALLOW_SUPPLEMENTARY_BACKFILL")
+    financial_conflict_tolerance_pct: float = Field(default=5.0, alias="FINANCIAL_CONFLICT_TOLERANCE_PCT")
+    financial_require_source_for_backfill: bool = Field(default=True, alias="FINANCIAL_REQUIRE_SOURCE_FOR_BACKFILL")
+    financial_backfill_write_debug: bool = Field(default=True, alias="FINANCIAL_BACKFILL_WRITE_DEBUG")
+
+    # VIETSTOCK_FINANCIAL_* names are legacy aliases. New deployments should use
+    # VIETSTOCK_BCTC_* because the user-facing report names this source as BCTC.
     enable_vietstock_financial_fallback: bool = Field(default=True, alias="ENABLE_VIETSTOCK_FINANCIAL_FALLBACK")
     enable_vietstock_bctc_fallback: bool | None = Field(default=None, alias="ENABLE_VIETSTOCK_BCTC_FALLBACK")
     vietstock_financial_url_template: str = Field(
@@ -153,8 +196,11 @@ class Settings(BaseSettings):
     playwright_headless: bool = Field(default=True, alias="PLAYWRIGHT_HEADLESS")
     playwright_viewport_width: int = Field(default=1600, alias="PLAYWRIGHT_VIEWPORT_WIDTH")
     playwright_viewport_height: int = Field(default=1100, alias="PLAYWRIGHT_VIEWPORT_HEIGHT")
-    playwright_navigation_timeout_ms: int = Field(default=60000, alias="PLAYWRIGHT_NAVIGATION_TIMEOUT_MS")
-    playwright_extra_wait_ms: int = Field(default=4000, alias="PLAYWRIGHT_EXTRA_WAIT_MS")
+    playwright_navigation_timeout_ms: int = Field(default=90000, alias="PLAYWRIGHT_NAVIGATION_TIMEOUT_MS")
+    playwright_extra_wait_ms: int = Field(default=5000, alias="PLAYWRIGHT_EXTRA_WAIT_MS")
+    playwright_wait_until: str = Field(default="domcontentloaded", alias="PLAYWRIGHT_WAIT_UNTIL")
+    playwright_retry_count: int = Field(default=2, alias="PLAYWRIGHT_RETRY_COUNT")
+    playwright_retry_backoff_ms: int = Field(default=1500, alias="PLAYWRIGHT_RETRY_BACKOFF_MS")
     external_data_debug_save_rendered_html: bool = Field(default=False, alias="EXTERNAL_DATA_DEBUG_SAVE_RENDERED_HTML")
     external_data_debug_save_extraction_json: bool = Field(default=False, alias="EXTERNAL_DATA_DEBUG_SAVE_EXTRACTION_JSON")
     vietstock_debug_save_rendered_html: bool = Field(default=False, alias="VIETSTOCK_DEBUG_SAVE_RENDERED_HTML")
@@ -163,6 +209,25 @@ class Settings(BaseSettings):
     default_capital_vnd: int = Field(default=100_000_000, alias="DEFAULT_CAPITAL_VND")
     default_risk_per_trade_pct: float = Field(default=1.0, alias="DEFAULT_RISK_PER_TRADE_PCT")
     default_max_position_pct: float = Field(default=12.0, alias="DEFAULT_MAX_POSITION_PCT")
+
+    enable_source_backed_missing_field_enrichment: bool = Field(default=True, alias="ENABLE_SOURCE_BACKED_MISSING_FIELD_ENRICHMENT")
+    missing_field_enrichment_timeout_ms: int = Field(default=30000, alias="MISSING_FIELD_ENRICHMENT_TIMEOUT_MS")
+    missing_field_enrichment_max_attempts: int = Field(default=2, alias="MISSING_FIELD_ENRICHMENT_MAX_ATTEMPTS")
+    missing_field_enrichment_allowed_sources: str = Field(
+        default="backend,cafef,vietstock,google_news_rss",
+        alias="MISSING_FIELD_ENRICHMENT_ALLOWED_SOURCES",
+    )
+    missing_field_enrichment_write_debug: bool = Field(default=True, alias="MISSING_FIELD_ENRICHMENT_WRITE_DEBUG")
+    report_missing_value_policy: str = Field(
+        default="source_backed_then_model_inference",
+        alias="REPORT_MISSING_VALUE_POLICY",
+    )
+    report_allow_safe_action_fallback: bool = Field(default=True, alias="REPORT_ALLOW_SAFE_ACTION_FALLBACK")
+    report_allow_safe_scenario_fallback: bool = Field(default=True, alias="REPORT_ALLOW_SAFE_SCENARIO_FALLBACK")
+    report_allow_safe_checklist_fallback: bool = Field(default=True, alias="REPORT_ALLOW_SAFE_CHECKLIST_FALLBACK")
+    report_allow_model_inference_for_qualitative_fields: bool = Field(default=True, alias="REPORT_ALLOW_MODEL_INFERENCE_FOR_QUALITATIVE_FIELDS")
+    report_require_source_for_numeric_facts: bool = Field(default=True, alias="REPORT_REQUIRE_SOURCE_FOR_NUMERIC_FACTS")
+    report_show_missing_reason: bool = Field(default=True, alias="REPORT_SHOW_MISSING_REASON")
 
     enable_scoring: bool = Field(default=True, alias="ENABLE_SCORING")
     scoring_min_financial_periods: int = Field(default=3, alias="SCORING_MIN_FINANCIAL_PERIODS")
@@ -202,6 +267,12 @@ class Settings(BaseSettings):
         except (TypeError, ValueError):
             return 90000
         return timeout_ms if timeout_ms > 0 else 90000
+
+    @field_validator("ai_report_history_save_failure_policy", mode="before")
+    @classmethod
+    def _validate_ai_report_history_save_failure_policy(cls, value: object) -> str:
+        clean = str(value or "non_blocking").strip().lower().replace("-", "_")
+        return clean if clean in {"non_blocking", "strict"} else "non_blocking"
 
     @property
     def env_file_path(self) -> str:
@@ -278,6 +349,16 @@ class Settings(BaseSettings):
     @property
     def effective_vietstock_financial_browser_viewport_height(self) -> int:
         return self.vietstock_bctc_browser_viewport_height or self.vietstock_financial_browser_viewport_height
+
+    @property
+    def missing_field_enrichment_allowed_source_list(self) -> list[str]:
+        sources = [item.strip().lower() for item in (self.missing_field_enrichment_allowed_sources or "").split(",") if item.strip()]
+        return sources or ["backend", "cafef", "vietstock", "google_news_rss"]
+
+    @property
+    def financial_source_priority_list(self) -> list[str]:
+        sources = [item.strip().lower() for item in (self.financial_source_priority or "").split(",") if item.strip()]
+        return sources or ["backend_analysis_data", "vietstock_bctc", "cafef_financial"]
 
 
 @lru_cache

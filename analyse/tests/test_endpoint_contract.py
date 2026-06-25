@@ -125,3 +125,28 @@ def test_analyse_one_cors_preflight_from_vite_origin():
     assert "POST" in response.headers["access-control-allow-methods"]
     assert "content-type" in response.headers["access-control-allow-headers"].lower()
     assert "authorization" in response.headers["access-control-allow-headers"].lower()
+
+
+def test_legacy_placeholder_endpoints_return_clear_501_and_are_hidden_from_docs():
+    app = create_app()
+    client = TestClient(app)
+
+    cases = [
+        ("/api/analyse/stock", {"symbol": "FPT", "data": {}}),
+        ("/api/analyse/watchlist", {"stocks": [{"symbol": "FPT"}]}),
+        ("/api/analyse/fetch-and-analyse/stock", {"symbol": "FPT"}),
+    ]
+
+    for path, payload in cases:
+        response = client.post(path, json=payload)
+
+        assert response.status_code == 501
+        body = response.json()
+        assert body["code"] == 501
+        assert body["error"]["type"] == "NOT_IMPLEMENTED"
+        assert body["data"] is None
+
+    schema = client.get("/openapi.json").json()
+    assert "/api/analyse/stock" not in schema["paths"]
+    assert "/api/analyse/watchlist" not in schema["paths"]
+    assert "/api/analyse/fetch-and-analyse/stock" not in schema["paths"]

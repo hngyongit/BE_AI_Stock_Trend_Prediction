@@ -14,6 +14,7 @@ from typing import Any
 from analyse.clients.http_client import HttpClient
 from analyse.config.settings import Settings, get_settings
 from analyse.research.vietstock_financial_adapter import VietstockFinancialAdapter
+from analyse.research.vietstock_financial_adapter import _TableParser
 from analyse.research.vietstock_financial_adapter import _dedupe_preserve_order
 from analyse.services.stock_data_service import StockDataService
 from analyse.utils.asyncio_windows import ensure_windows_proactor_event_loop_policy
@@ -22,20 +23,28 @@ from analyse.utils.datetime_utils import now_iso
 from analyse.utils.playwright_safe import PlaywrightTimeoutError
 from analyse.utils.playwright_safe import TargetClosedError
 from analyse.utils.playwright_safe import cancel_pending_tasks_safely
-from analyse.utils.playwright_safe import close_playwright_objects_safely
+from analyse.utils.playwright_safe import cleanup_playwright_runtime_safely
 from analyse.utils.playwright_safe import gather_safely
 from analyse.utils.playwright_safe import infer_symbol_from_url
 from analyse.utils.playwright_safe import is_playwright_timeout_error
 from analyse.utils.playwright_safe import is_target_closed_error
-from analyse.utils.playwright_safe import remove_playwright_listener_safely
 from analyse.utils.playwright_safe import safe_playwright_error_message
-from analyse.utils.playwright_safe import save_playwright_error_debug
+from analyse.utils.debug_scrub import scrub_debug_payload, scrub_debug_text
 from analyse.utils.symbol_utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
 
 CAFEF_FINANCIAL_WAIT_UNTIL = "domcontentloaded"
 CAFEF_FINANCIAL_TIMEOUT_WARNING = "CafeF financial page timed out before usable financial periods were extracted."
+CAFEF_FINANCIAL_URL_TEMPLATE = "https://cafef.vn/du-lieu/{exchange}/{symbol}-tai-chinh.chn"
+
+
+def build_cafef_financial_url(symbol: str, exchange: str | None = None, template: str | None = None) -> str:
+    symbol_clean = str(symbol or "").strip().lower()
+    exchange_clean = str(exchange or "HOSE").strip().lower() or "hose"
+    url_template = template or CAFEF_FINANCIAL_URL_TEMPLATE
+    url = url_template.format(exchange=exchange_clean, symbol=symbol_clean).strip()
+    return re.sub(r"(?<!:)//+", "/", url)
 
 
 class PlaywrightCafeFFinancialRenderer:
@@ -103,6 +112,8 @@ class PlaywrightCafeFFinancialRenderer:
                 await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
                 debug_phase = "content_wait"
                 await self._wait_for_content(page)
+                debug_phase = "select_financial_tabs"
+                await self._select_financial_tabs(page)
                 debug_phase = "post_dom_wait"
                 await page.wait_for_timeout(1500)
                 if pending_tasks:
@@ -149,31 +160,28 @@ class PlaywrightCafeFFinancialRenderer:
             logger.warning("[%s] Playwright crawler failed safely: %s", label, exc, exc_info=True)
             return None, [f"CafeF financial rendering failed: {exc.__class__.__name__}: {self._safe_error_message(exc)}"]
         finally:
-            if response_handler is not None:
-                remove_playwright_listener_safely(page, "response", response_handler, label=label)
-            logger.info("[%s] pending tasks count=%s", label, len([task for task in pending_tasks if not task.done()]))
-            await cancel_pending_tasks_safely(pending_tasks, label=label)
-            await close_playwright_objects_safely(page=page, context=context, browser=browser, label=label)
-            if debug_error is not None:
-                if is_playwright_timeout_error(debug_error):
-                    self._save_timeout_debug(
-                        url,
-                        timeout_ms=timeout_ms,
-                        wait_until=wait_until,
-                        error=debug_error,
-                        phase=debug_phase,
-                    )
-                save_playwright_error_debug(
-                    self.settings,
-                    source="CafeF tài chính",
-                    url=url,
-                    slug="cafef_financial",
+            if debug_error is not None and is_playwright_timeout_error(debug_error):
+                self._save_timeout_debug(
+                    url,
+                    timeout_ms=timeout_ms,
+                    wait_until=wait_until,
                     error=debug_error,
                     phase=debug_phase,
-                    pending_tasks_count=len([task for task in pending_tasks if not task.done()]),
-                    cleanup_completed=True,
                 )
-            logger.info("[%s] cleanup completed", label)
+            await cleanup_playwright_runtime_safely(
+                page=page,
+                context=context,
+                browser=browser,
+                pending_tasks=pending_tasks,
+                response_handler=response_handler,
+                label=label,
+                debug_settings=self.settings,
+                debug_source="CafeF tài chính",
+                debug_url=url,
+                debug_slug="cafef_financial",
+                debug_error=debug_error,
+                debug_phase=debug_phase,
+            )
 
     async def _wait_for_content(self, page: Any) -> None:
         for selector in (
@@ -182,13 +190,37 @@ class PlaywrightCafeFFinancialRenderer:
             "text=Thu nhập lãi thuần",
             "text=Lợi nhuận sau thuế",
             "text=Tổng cộng tài sản",
+            "text=Lưu chuyển tiền",
             "text=Báo cáo tài chính",
+            "[class*=financial]",
+            "[id*=finance]",
         ):
             try:
                 await page.wait_for_selector(selector, timeout=4000)
                 return
             except Exception:
                 continue
+
+    async def _select_financial_tabs(self, page: Any) -> None:
+        for text in (
+            "Quý",
+            "Tỷ đồng",
+            "Kết quả kinh doanh",
+            "Cân đối kế toán",
+            "Lưu chuyển tiền tệ",
+            "Chỉ số tài chính",
+        ):
+            for selector in (f"text={text}", f"a:has-text('{text}')", f"button:has-text('{text}')", f"label:has-text('{text}')"):
+                try:
+                    locator = page.locator(selector).first()
+                    if await locator.count() <= 0:
+                        continue
+                    if await locator.is_visible(timeout=700):
+                        await locator.click(timeout=1200)
+                        await page.wait_for_timeout(300)
+                        break
+                except Exception:
+                    continue
 
     def _safe_error_message(self, exc: Exception) -> str:
         message = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
@@ -214,7 +246,7 @@ class PlaywrightCafeFFinancialRenderer:
             return
         payload = {
             "source": "CafeF tài chính",
-            "url": url,
+            "url": self._scrub_debug_payload(url),
             "timeout_ms": timeout_ms,
             "wait_until": wait_until,
             "error_type": "PlaywrightTimeoutError",
@@ -227,11 +259,14 @@ class PlaywrightCafeFFinancialRenderer:
             debug_dir.mkdir(parents=True, exist_ok=True)
             symbol = infer_symbol_from_url(url)
             (debug_dir / f"{normalize_symbol(symbol)}_cafef_financial_timeout.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(self._scrub_debug_payload(payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception:
             return
+
+    def _scrub_debug_payload(self, value: Any) -> Any:
+        return scrub_debug_payload(value)
 
 
 class CafeFFinancialAdapter:
@@ -251,10 +286,10 @@ class CafeFFinancialAdapter:
 
     async def fetch(self, symbol: str, exchange: str | None = None) -> dict[str, Any]:
         clean_symbol = normalize_symbol(symbol)
-        clean_exchange = (exchange or "HOSE").strip().lower()
-        source_url = self.settings.cafef_financial_url_template.format(
-            exchange=clean_exchange,
-            symbol=clean_symbol.lower(),
+        source_url = build_cafef_financial_url(
+            clean_symbol,
+            exchange or "HOSE",
+            self.settings.cafef_financial_url_template,
         )
         if not self.settings.enable_cafef_financial_fallback:
             return self._result(source_url, [], ["CafeF tài chính fallback đang tắt theo cấu hình."], [], "disabled")
@@ -262,7 +297,7 @@ class CafeFFinancialAdapter:
         warnings: list[str] = []
         technical_warnings: list[str] = []
         try:
-            html_text = await self._fetch_with_cache(source_url, "static")
+            html_text = await self._fetch_with_retries(source_url, "static")
         except Exception as exc:
             html_text = ""
             warnings.append("Dữ liệu tài chính CafeF chưa sẵn sàng trong lần chạy này.")
@@ -279,7 +314,7 @@ class CafeFFinancialAdapter:
         if self.settings.cafef_financial_use_browser_fallback:
             rendered_html = self._read_cache(source_url, "rendered")
             if rendered_html is None:
-                rendered_html, browser_warnings = await self.browser_renderer.fetch_rendered_html(source_url)
+                rendered_html, browser_warnings = await self._fetch_rendered_with_retries(source_url)
                 warnings.extend(browser_warnings)
                 technical_warnings.extend(browser_warnings)
                 if rendered_html:
@@ -310,6 +345,7 @@ class CafeFFinancialAdapter:
 
     def parse_html(self, html_text: str, *, source_url: str) -> dict[str, Any]:
         parsed = self._parser.parse_html(html_text or "", source_url=source_url)
+        raw_audit = self._extract_table_audit(html_text or "")
         periods = parsed.get("periods") if isinstance(parsed.get("periods"), list) else []
         valid_periods = StockDataService.valid_financial_periods(periods)
         unit = parsed.get("unit") or self.settings.cafef_financial_unit
@@ -333,11 +369,11 @@ class CafeFFinancialAdapter:
             ratio_only = True
         else:
             usable_periods = []
-            status = "partial" if periods else "failed"
+            status = "insufficient" if raw_audit.get("tables_found") or raw_audit.get("raw_period_headers") else "failed"
             ratio_only = False
             if periods:
                 warnings.append("CafeF chỉ nhận diện được kỳ báo cáo nhưng chưa đủ chỉ tiêu định lượng.")
-        return self._result(
+        result = self._result(
             source_url,
             usable_periods,
             _dedupe_preserve_order(warnings),
@@ -346,6 +382,19 @@ class CafeFFinancialAdapter:
             unit=unit,
             financial_ratios_only=ratio_only,
         )
+        audit = self._build_audit(
+            source_url=source_url,
+            html_text=html_text or "",
+            raw_audit=raw_audit,
+            periods=usable_periods,
+            status=status,
+            warnings=result["warnings"],
+        )
+        result["audit"] = audit
+        result["mapped_metrics"] = audit["mapped_metrics"]
+        result["unmapped_metrics"] = audit["unmapped_metrics"]
+        result["normalized_metrics_count"] = audit["normalized_metrics_count"]
+        return result
 
     def _is_full_bctc_period(self, period: dict[str, Any]) -> bool:
         normal_keys = {
@@ -358,10 +407,20 @@ class CafeFFinancialAdapter:
             "total_assets",
             "total_liabilities",
             "equity",
+            "cash_and_equivalents",
+            "inventory",
+            "short_term_debt",
+            "long_term_debt",
+            "operating_cash_flow",
+            "investing_cash_flow",
+            "financing_cash_flow",
         }
         bank_keys = {
             "net_interest_income",
             "net_fee_income",
+            "trading_income",
+            "other_income",
+            "operating_expenses",
             "pre_provision_operating_profit",
             "profit_before_tax",
             "profit_after_tax",
@@ -369,6 +428,10 @@ class CafeFFinancialAdapter:
             "customer_loans",
             "customer_deposits",
             "equity",
+            "nim",
+            "npl_ratio",
+            "casa_ratio",
+            "cir",
         }
         normal_count = sum(1 for key in normal_keys if self._is_number(period.get(key)))
         bank_count = sum(1 for key in bank_keys if self._is_number(period.get(key)))
@@ -421,6 +484,32 @@ class CafeFFinancialAdapter:
         self._write_cache(url, text, cache_kind)
         return text
 
+    async def _fetch_with_retries(self, url: str, cache_kind: str) -> str:
+        attempts = max(1, int(getattr(self.settings, "playwright_retry_count", 2) or 2))
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return await self._fetch_with_cache(url, cache_kind)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= attempts - 1:
+                    break
+                await asyncio.sleep(max(0, int(getattr(self.settings, "playwright_retry_backoff_ms", 1500) or 0)) / 1000)
+        assert last_exc is not None
+        raise last_exc
+
+    async def _fetch_rendered_with_retries(self, url: str) -> tuple[str | None, list[str]]:
+        attempts = max(1, int(getattr(self.settings, "playwright_retry_count", 2) or 2))
+        warnings: list[str] = []
+        for attempt in range(attempts):
+            html_text, attempt_warnings = await self.browser_renderer.fetch_rendered_html(url)
+            warnings.extend(self._as_list(attempt_warnings))
+            if html_text:
+                return html_text, _dedupe_preserve_order(warnings)
+            if attempt < attempts - 1:
+                await asyncio.sleep(max(0, int(getattr(self.settings, "playwright_retry_backoff_ms", 1500) or 0)) / 1000)
+        return None, _dedupe_preserve_order(warnings)
+
     def _cache_path(self, url: str, cache_kind: str) -> Path:
         digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
         return self.cache_dir / f"cafef_financial_{cache_kind}_{digest}.json"
@@ -453,7 +542,7 @@ class CafeFFinancialAdapter:
         try:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f"{normalize_symbol(symbol)}_cafef_financial_rendered.html").write_text(html_text, encoding="utf-8")
+            (debug_dir / f"{normalize_symbol(symbol)}_cafef_financial_rendered.html").write_text(scrub_debug_text(html_text), encoding="utf-8")
         except Exception:
             return
 
@@ -461,11 +550,20 @@ class CafeFFinancialAdapter:
         if not (self.settings.external_data_debug_save_extraction_json or self.settings.vietstock_debug_save_extraction_json):
             return
         periods = result.get("periods") if isinstance(result.get("periods"), list) else []
+        audit = result.get("audit") if isinstance(result.get("audit"), dict) else self._build_audit(
+            source_url=source_url,
+            html_text=html_text or "",
+            raw_audit=self._extract_table_audit(html_text or ""),
+            periods=periods,
+            status=str(result.get("status") or ""),
+            warnings=result.get("warnings") or [],
+        )
         payload = {
             "source_url": source_url,
             "parser_mode": render_status,
             "table_headers_found": self._table_headers(html_text),
             "row_count": len(re.findall(r"(?is)<tr\b", html_text or "")),
+            "financial_audit": audit,
             "accepted_rows": periods,
             "final_normalized_data": result,
             "source_status": result.get("status"),
@@ -476,7 +574,11 @@ class CafeFFinancialAdapter:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
             (debug_dir / f"{normalize_symbol(symbol)}_cafef_financial_extraction.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(self._scrub_debug_payload(payload), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (debug_dir / f"{normalize_symbol(symbol)}_cafef_financial_audit.json").write_text(
+                json.dumps(self._scrub_debug_payload({"symbol": normalize_symbol(symbol), **audit}), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception:
@@ -490,6 +592,108 @@ class CafeFFinancialAdapter:
             if clean:
                 headers.append(clean)
         return headers[:60]
+
+    def _extract_table_audit(self, html_text: str) -> dict[str, Any]:
+        parser = _TableParser()
+        try:
+            parser.feed(html_text or "")
+        except Exception:
+            return {
+                "tables_found": 0,
+                "raw_period_headers": [],
+                "raw_metric_rows_count": 0,
+                "mapped_metrics": [],
+                "unmapped_metrics": [],
+            }
+        period_headers: list[str] = []
+        mapped: dict[str, dict[str, str]] = {}
+        unmapped: list[str] = []
+        metric_rows = 0
+        for table in parser.tables:
+            table_period_indexes: set[int] = set()
+            for row in table[:8]:
+                for index, cell in enumerate(row):
+                    meta = self._parser._parse_period(cell)  # noqa: SLF001 - shared parser contract
+                    if meta:
+                        period_headers.append(str(meta.get("period") or cell))
+                        table_period_indexes.add(index)
+            for row in table:
+                if len(row) < 2:
+                    continue
+                if any(self._parser._parse_period(cell) for idx, cell in enumerate(row) if idx in table_period_indexes):  # noqa: SLF001
+                    continue
+                label = ""
+                for index, cell in enumerate(row):
+                    if index not in table_period_indexes and cell:
+                        label = cell
+                        break
+                if not label:
+                    continue
+                values = [self._parser._parse_number(cell) for idx, cell in enumerate(row) if idx in table_period_indexes]  # noqa: SLF001
+                if not any(value is not None for value in values):
+                    continue
+                metric_rows += 1
+                field = self._parser._map_label_to_field(label)  # noqa: SLF001
+                if field:
+                    mapped[field] = {"field": field, "raw_label": label}
+                elif label not in unmapped:
+                    unmapped.append(label)
+        return {
+            "tables_found": len(parser.tables),
+            "raw_period_headers": _dedupe_preserve_order(period_headers)[:40],
+            "raw_metric_rows_count": metric_rows,
+            "mapped_metrics": list(mapped.values()),
+            "unmapped_metrics": unmapped[:80],
+        }
+
+    def _build_audit(
+        self,
+        *,
+        source_url: str,
+        html_text: str,
+        raw_audit: dict[str, Any],
+        periods: list[dict[str, Any]],
+        status: str,
+        warnings: list[str],
+    ) -> dict[str, Any]:
+        mapped_metric_names = self._financial_metrics_found(periods)
+        return {
+            "url": source_url,
+            "attempted": True,
+            "page_loaded": bool(html_text),
+            "tables_found": raw_audit.get("tables_found") or 0,
+            "raw_period_headers": raw_audit.get("raw_period_headers") or [],
+            "raw_metric_rows_count": raw_audit.get("raw_metric_rows_count") or 0,
+            "normalized_periods_count": len(periods),
+            "normalized_metrics_count": sum(
+                1
+                for period in periods
+                if isinstance(period, dict)
+                for key, value in period.items()
+                if key not in {"period", "year", "quarter"} and isinstance(value, (int, float)) and not isinstance(value, bool)
+            ),
+            "mapped_metrics": raw_audit.get("mapped_metrics") or [{"field": field, "raw_label": field} for field in mapped_metric_names],
+            "unmapped_metrics": raw_audit.get("unmapped_metrics") or [],
+            "merge_contributions": [],
+            "source_status_before": status,
+            "source_status_after": status,
+            "warnings": warnings,
+        }
+
+    def _financial_metrics_found(self, periods: list[dict[str, Any]]) -> list[str]:
+        metrics: set[str] = set()
+        for period in periods:
+            if not isinstance(period, dict):
+                continue
+            for key, value in period.items():
+                if key in {"period", "year", "quarter", "source", "source_url"}:
+                    continue
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    metrics.add(key)
+        return sorted(metrics)
+
+    def _scrub_debug_payload(self, value: Any) -> Any:
+        return scrub_debug_payload(value)
 
     def _result(
         self,

@@ -39,6 +39,24 @@ def test_settings_support_report_export_and_research_variables():
         RESEARCH_USER_AGENT="pytest-agent",
         RESEARCH_GOOGLE_NEWS_RSS_ENABLED=True,
         RESEARCH_SOURCE_PRIORITY="cafef.vn,vietstock.vn",
+        RESEARCH_OFFICIAL_SOURCE_PRIORITY="hsx.vn,hnx.vn,ssc.gov.vn",
+        ENABLE_SOURCE_BACKED_RESEARCH=True,
+        ENABLE_DEEP_RESEARCH_CRAWL=True,
+        SOURCE_BACKED_RESEARCH_TIMEOUT_MS=45000,
+        SOURCE_BACKED_RESEARCH_MAX_ARTICLES=20,
+        SOURCE_BACKED_RESEARCH_MAX_SOURCES_PER_SYMBOL=12,
+        SOURCE_BACKED_RESEARCH_MAX_CRAWL_DEPTH=1,
+        SOURCE_BACKED_RESEARCH_CACHE_TTL_SECONDS=21600,
+        SOURCE_BACKED_RESEARCH_REQUIRE_SOURCE_FOR_NUMERIC_FACTS=True,
+        GOOGLE_NEWS_RSS_MAX_ITEMS=15,
+        GOOGLE_NEWS_RSS_LANGUAGE="vi",
+        GOOGLE_NEWS_RSS_COUNTRY="VN",
+        ENABLE_FORECAST_SCENARIOS=True,
+        FORECAST_TIME_HORIZONS="short_term,base_term,medium_term",
+        FORECAST_SCENARIO_COUNT=3,
+        FORECAST_REQUIRE_TRIGGER_AND_INVALIDATION=True,
+        FORECAST_ALLOW_PROBABILISTIC_LANGUAGE=True,
+        FORECAST_DEFAULT_PROBABILITY_METHOD="score_weighted",
     )
 
     assert settings.report_output_dir == "custom_reports"
@@ -60,6 +78,24 @@ def test_settings_support_report_export_and_research_variables():
     assert settings.research_user_agent == "pytest-agent"
     assert settings.research_google_news_rss_enabled is True
     assert settings.research_source_priority == "cafef.vn,vietstock.vn"
+    assert settings.research_official_source_priority == "hsx.vn,hnx.vn,ssc.gov.vn"
+    assert settings.enable_source_backed_research is True
+    assert settings.enable_deep_research_crawl is True
+    assert settings.source_backed_research_timeout_ms == 45000
+    assert settings.source_backed_research_max_articles == 20
+    assert settings.source_backed_research_max_sources_per_symbol == 12
+    assert settings.source_backed_research_max_crawl_depth == 1
+    assert settings.source_backed_research_cache_ttl_seconds == 21600
+    assert settings.source_backed_research_require_source_for_numeric_facts is True
+    assert settings.google_news_rss_max_items == 15
+    assert settings.google_news_rss_language == "vi"
+    assert settings.google_news_rss_country == "VN"
+    assert settings.enable_forecast_scenarios is True
+    assert settings.forecast_time_horizons == "short_term,base_term,medium_term"
+    assert settings.forecast_scenario_count == 3
+    assert settings.forecast_require_trigger_and_invalidation is True
+    assert settings.forecast_allow_probabilistic_language is True
+    assert settings.forecast_default_probability_method == "score_weighted"
 
 
 def test_settings_support_canonical_env_aliases_and_env_file_path():
@@ -76,6 +112,9 @@ def test_settings_support_canonical_env_aliases_and_env_file_path():
         PLAYWRIGHT_VIEWPORT_HEIGHT=720,
         PLAYWRIGHT_NAVIGATION_TIMEOUT_MS=45000,
         PLAYWRIGHT_EXTRA_WAIT_MS=1500,
+        PLAYWRIGHT_WAIT_UNTIL="domcontentloaded",
+        PLAYWRIGHT_RETRY_COUNT=2,
+        PLAYWRIGHT_RETRY_BACKOFF_MS=1500,
     )
 
     assert settings.analyse_log_level == "DEBUG"
@@ -90,6 +129,9 @@ def test_settings_support_canonical_env_aliases_and_env_file_path():
     assert settings.playwright_viewport_height == 720
     assert settings.playwright_navigation_timeout_ms == 45000
     assert settings.playwright_extra_wait_ms == 1500
+    assert settings.playwright_wait_until == "domcontentloaded"
+    assert settings.playwright_retry_count == 2
+    assert settings.playwright_retry_backoff_ms == 1500
     assert settings.env_file_path.endswith("analyse\\.env") or settings.env_file_path.endswith("analyse/.env")
 
 
@@ -120,6 +162,7 @@ def test_config_check_masks_secrets():
         BACKEND_API_TOKEN="secret-token",
         OPENAI_API_KEY="sk-secret",
         GEMINI_API_KEY="gemini-secret",
+        AI_REPORT_DB_URL="mssql+pyodbc://user:sql-secret@localhost:1433/AIStockAnalysis?driver=ODBC+Driver+18+for+SQL+Server",
         BACKEND_API_BASE_URL="http://localhost:5000/api",
     )
 
@@ -130,8 +173,12 @@ def test_config_check_masks_secrets():
     assert data["backend"]["request_auth"] == "required_via_authorization_header"
     assert data["providers"]["openai"] == "configured"
     assert data["providers"]["gemini"] == "configured"
+    assert data["history"]["db_url"] == "set"
+    assert data["history"]["db_url_safe_for_log"]
+    assert "sql-secret" not in str(data["history"]["db_url_safe_for_log"])
     assert "secret-token" not in str(data)
     assert "sk-secret" not in str(data)
+    assert "sql-secret" not in str(data)
 
 
 def test_settings_support_backend_analysis_data_and_scoring_variables():
@@ -144,7 +191,14 @@ def test_settings_support_backend_analysis_data_and_scoring_variables():
         BACKEND_ANALYSIS_DATA_INCLUDE_PEERS=False,
         BACKEND_ANALYSIS_DATA_INCLUDE_MARKET_CONTEXT=False,
         BACKEND_STOCK_CHART_ENDPOINT="/api/stocks/{symbol}/chart",
+        BACKEND_CURRENT_USER_ENDPOINT="/api/users/me",
         BACKEND_WATCHLIST_REQUIRED=True,
+        ENABLE_AI_REPORT_HISTORY=True,
+        AI_REPORT_DB_URL="mssql+pyodbc://user:password@localhost:1433/AIStockAnalysis?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes",
+        AI_REPORT_HISTORY_SAVE_FAILURE_POLICY="strict",
+        REPORT_MISSING_VALUE_POLICY="source_backed_then_model_inference",
+        REPORT_ALLOW_MODEL_INFERENCE_FOR_QUALITATIVE_FIELDS=True,
+        REPORT_SHOW_MISSING_REASON=True,
         ENABLE_SCORING=True,
         SCORING_MIN_FINANCIAL_PERIODS=4,
         SCORING_REQUIRE_FINANCIALS_FOR_OVERALL=True,
@@ -160,7 +214,14 @@ def test_settings_support_backend_analysis_data_and_scoring_variables():
     assert settings.backend_analysis_data_include_peers is False
     assert settings.backend_analysis_data_include_market_context is False
     assert settings.backend_stock_chart_endpoint == "/api/stocks/{symbol}/chart"
+    assert settings.backend_current_user_endpoint == "/api/users/me"
     assert settings.backend_watchlist_required is True
+    assert settings.enable_ai_report_history is True
+    assert settings.ai_report_db_url.startswith("mssql+pyodbc://")
+    assert settings.ai_report_history_save_failure_policy == "strict"
+    assert settings.report_missing_value_policy == "source_backed_then_model_inference"
+    assert settings.report_allow_model_inference_for_qualitative_fields is True
+    assert settings.report_show_missing_reason is True
     assert settings.enable_scoring is True
     assert settings.scoring_min_financial_periods == 4
     assert settings.scoring_require_financials_for_overall is True

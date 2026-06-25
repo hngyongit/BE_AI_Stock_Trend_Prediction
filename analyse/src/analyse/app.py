@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -12,12 +14,19 @@ from analyse.services.config_diagnostic_service import log_startup_config
 def create_app() -> FastAPI:
     """Khởi tạo FastAPI app độc lập cho analyse service."""
     settings = get_settings()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        log_startup_config(settings)
+        yield
+
     app = FastAPI(
         title="Analyse Service",
         description="Service Python/FastAPI phân tích cổ phiếu Việt Nam bằng AI/LLM, hỗ trợ Gemini và OpenAI.",
         version="0.2.0",
         docs_url="/api/analyse/docs",
         redoc_url="/api/analyse/redoc",
+        lifespan=lifespan,
     )
 
     app.add_middleware(
@@ -39,10 +48,6 @@ def create_app() -> FastAPI:
                 "target_endpoint": "/api/ai-reports/analyse-one",
             },
         )
-
-    @app.on_event("startup")
-    async def startup_config_log() -> None:
-        log_startup_config(settings)
 
     app.include_router(router)
     return app

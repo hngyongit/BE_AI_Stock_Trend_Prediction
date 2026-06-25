@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable
 
+from analyse.utils.debug_scrub import scrub_debug_payload
 from analyse.utils.symbol_utils import normalize_symbol
 
 try:  # Keep the analyse service importable even when browser deps are absent.
@@ -77,13 +78,15 @@ async def cancel_pending_tasks_safely(
     *,
     label: str,
 ) -> None:
-    safe_tasks = [task for task in tasks if task is not None and not task.done()]
-    for task in safe_tasks:
+    safe_tasks = [task for task in tasks if task is not None]
+    pending_tasks = [task for task in safe_tasks if not task.done()]
+    for task in pending_tasks:
         task.cancel()
 
     if safe_tasks:
-        await asyncio.gather(*safe_tasks, return_exceptions=True)
-        logger.info("[%s] Cancelled %s pending Playwright tasks", label, len(safe_tasks))
+        await gather_safely(safe_tasks, label=label)
+    if pending_tasks:
+        logger.info("[%s] Cancelled %s pending Playwright tasks", label, len(pending_tasks))
 
 
 async def close_playwright_objects_safely(
@@ -132,6 +135,42 @@ def remove_playwright_listener_safely(
             logger.warning("[%s] Failed to remove Playwright %s listener safely: %s", label, event, exc)
 
 
+async def cleanup_playwright_runtime_safely(
+    *,
+    page: Any = None,
+    context: Any = None,
+    browser: Any = None,
+    pending_tasks: Iterable[asyncio.Task[Any]] | None = None,
+    response_handler: Any = None,
+    listener_event: str = "response",
+    label: str,
+    debug_settings: Any = None,
+    debug_source: str | None = None,
+    debug_url: str | None = None,
+    debug_slug: str = "",
+    debug_error: BaseException | None = None,
+    debug_phase: str = "unknown",
+) -> None:
+    tracked_tasks = [task for task in (pending_tasks or []) if task is not None]
+    if response_handler is not None:
+        remove_playwright_listener_safely(page, listener_event, response_handler, label=label)
+    logger.info("[%s] pending tasks count=%s", label, len([task for task in tracked_tasks if not task.done()]))
+    await cancel_pending_tasks_safely(tracked_tasks, label=label)
+    await close_playwright_objects_safely(page=page, context=context, browser=browser, label=label)
+    if debug_error is not None and debug_settings is not None and debug_source is not None and debug_url is not None:
+        save_playwright_error_debug(
+            debug_settings,
+            source=debug_source,
+            url=debug_url,
+            slug=debug_slug,
+            error=debug_error,
+            phase=debug_phase,
+            pending_tasks_count=len([task for task in tracked_tasks if not task.done()]),
+            cleanup_completed=True,
+        )
+    logger.info("[%s] cleanup completed", label)
+
+
 def infer_symbol_from_url(url: str) -> str:
     text = str(url or "")
     patterns = (
@@ -174,7 +213,8 @@ def save_playwright_error_debug(
         debug_dir = Path(getattr(settings, "report_output_dir", "reports")) / "debug"
         debug_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{symbol}_{slug}_playwright_error.json" if slug else f"{symbol}_playwright_error.json"
-        (debug_dir / filename).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        safe_payload = scrub_debug_payload(payload)
+        (debug_dir / filename).write_text(json.dumps(safe_payload, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as exc:  # pragma: no cover - debug best effort only
         logger.warning("[playwright:%s] Could not save debug artifact: %s", slug or "error", exc)
 

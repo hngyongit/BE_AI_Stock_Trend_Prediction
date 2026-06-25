@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 
 from analyse.config.settings import Settings
@@ -10,6 +11,7 @@ from analyse.utils.playwright_safe import PlaywrightTimeoutError
 from analyse.utils.playwright_safe import TargetClosedError
 from analyse.utils.playwright_safe import cancel_pending_tasks_safely
 from analyse.utils.playwright_safe import close_playwright_objects_safely
+from analyse.utils.playwright_safe import cleanup_playwright_runtime_safely
 from analyse.utils.playwright_safe import gather_safely
 from analyse.utils.playwright_safe import save_playwright_error_debug
 
@@ -42,14 +44,45 @@ def test_gather_safely_retrieves_playwright_task_exceptions():
 
 
 def test_cancel_pending_tasks_safely_cancels_leftover_work():
+    cleanup_completed = False
+
     async def sleeper():
-        await asyncio.sleep(30)
+        nonlocal cleanup_completed
+        try:
+            await asyncio.sleep(30)
+        finally:
+            cleanup_completed = True
 
     async def run():
         task = asyncio.create_task(sleeper())
+        await asyncio.sleep(0)
         await cancel_pending_tasks_safely([task], label="test-cancel")
         assert task.done()
         assert task.cancelled()
+        assert cleanup_completed
+
+    asyncio.run(run())
+
+
+def test_cancel_pending_tasks_safely_drains_already_failed_tasks():
+    async def run():
+        loop = asyncio.get_running_loop()
+        contexts = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+        try:
+            tasks = [asyncio.create_task(_raise_target_closed())]
+            await asyncio.sleep(0)
+            assert tasks[0].done()
+
+            await cancel_pending_tasks_safely(tasks, label="test-drain-done")
+
+            del tasks
+            gc.collect()
+            await asyncio.sleep(0)
+            assert contexts == []
+        finally:
+            loop.set_exception_handler(previous_handler)
 
     asyncio.run(run())
 
@@ -71,6 +104,65 @@ def test_close_playwright_objects_safely_ignores_close_errors():
         )
 
     asyncio.run(run())
+
+
+def test_cleanup_playwright_runtime_safely_drains_closes_and_writes_debug(tmp_path):
+    class FakePage:
+        def __init__(self):
+            self.removed = None
+            self.closed = False
+
+        def remove_listener(self, event, handler):
+            self.removed = (event, handler)
+
+        async def close(self):
+            self.closed = True
+
+    class CloseTracks:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    async def run():
+        page = FakePage()
+        context = CloseTracks()
+        browser = CloseTracks()
+        handler = object()
+        tasks = [asyncio.create_task(_raise_target_closed())]
+        await asyncio.sleep(0)
+        settings = Settings(
+            REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+            EXTERNAL_DATA_DEBUG_SAVE_EXTRACTION_JSON=True,
+        )
+
+        await cleanup_playwright_runtime_safely(
+            page=page,
+            context=context,
+            browser=browser,
+            pending_tasks=tasks,
+            response_handler=handler,
+            label="test-runtime",
+            debug_settings=settings,
+            debug_source="CafeF thông tin doanh nghiệp",
+            debug_url="https://cafef.vn/du-lieu/hose/vcb-ban-lanh-dao-so-huu.chn",
+            debug_slug="cafef_company",
+            debug_error=_target_closed(),
+            debug_phase="response_handler",
+        )
+
+        assert page.removed == ("response", handler)
+        assert page.closed is True
+        assert context.closed is True
+        assert browser.closed is True
+
+    asyncio.run(run())
+
+    payload_path = tmp_path / "reports" / "debug" / "VCB_cafef_company_playwright_error.json"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    assert payload["source"] == "CafeF thông tin doanh nghiệp"
+    assert payload["cleanup_completed"] is True
 
 
 def test_playwright_error_debug_artifact_is_sanitized(tmp_path):
@@ -101,6 +193,32 @@ def test_playwright_error_debug_artifact_is_sanitized(tmp_path):
     assert payload["cleanup_completed"] is True
     assert "request-token" not in serialized
     assert "sk-secret" not in serialized
+
+
+def test_playwright_error_debug_artifact_scrubs_url_and_error_message(tmp_path):
+    settings = Settings(
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+        EXTERNAL_DATA_DEBUG_SAVE_EXTRACTION_JSON=True,
+    )
+
+    save_playwright_error_debug(
+        settings,
+        source="CafeF tài chính",
+        url="https://cafef.vn/du-lieu/hose/vcb-tai-chinh.chn?token=raw-token",
+        slug="cafef_financial",
+        error=RuntimeError("Authorization: Bearer raw-secret api_key=raw-key"),
+        phase="page.goto",
+        pending_tasks_count=0,
+        cleanup_completed=True,
+    )
+
+    payload_path = tmp_path / "reports" / "debug" / "VCB_cafef_financial_playwright_error.json"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "raw-token" not in serialized
+    assert "raw-secret" not in serialized
+    assert "raw-key" not in serialized
+    assert "<redacted>" in serialized
 
 
 def test_cafef_financial_renderer_converts_target_closed_to_warning(monkeypatch, tmp_path):
@@ -181,6 +299,8 @@ def test_cafef_financial_renderer_uses_domcontentloaded_and_configured_timeout(m
     class FakePage:
         def __init__(self):
             self.goto_calls = []
+            self.closed = False
+            self.removed = None
 
         def on(self, event, handler):
             self.event = event
@@ -202,27 +322,37 @@ def test_cafef_financial_renderer_uses_domcontentloaded_and_configured_timeout(m
             return "<html><table><tr><td>ok</td></tr></table></html>"
 
         async def close(self):
-            return None
+            self.closed = True
 
     fake_page = FakePage()
 
     class FakeContext:
+        def __init__(self):
+            self.closed = False
+
         async def new_page(self):
             return fake_page
 
         async def close(self):
-            return None
+            self.closed = True
+
+    fake_context = FakeContext()
 
     class FakeBrowser:
+        def __init__(self):
+            self.closed = False
+
         async def new_context(self, **kwargs):
-            return FakeContext()
+            return fake_context
 
         async def close(self):
-            return None
+            self.closed = True
+
+    fake_browser = FakeBrowser()
 
     class FakeChromium:
         async def launch(self, **kwargs):
-            return FakeBrowser()
+            return fake_browser
 
     class FakePlaywright:
         chromium = FakeChromium()
@@ -258,6 +388,10 @@ def test_cafef_financial_renderer_uses_domcontentloaded_and_configured_timeout(m
             "timeout": 91000,
         }
     ]
+    assert fake_page.removed == ("response", fake_page.handler)
+    assert fake_page.closed is True
+    assert fake_context.closed is True
+    assert fake_browser.closed is True
 
 
 def test_cafef_financial_timeout_writes_specific_debug_artifact(monkeypatch, tmp_path):
@@ -326,8 +460,11 @@ def test_cafef_financial_timeout_writes_specific_debug_artifact(monkeypatch, tmp
     html, warnings = asyncio.run(renderer._fetch_rendered_html_direct("https://cafef.vn/du-lieu/hose/vcb-tai-chinh.chn"))
 
     payload_path = tmp_path / "reports" / "debug" / "VCB_cafef_financial_timeout.json"
+    generic_payload_path = tmp_path / "reports" / "debug" / "VCB_cafef_financial_playwright_error.json"
     payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    generic_payload = json.loads(generic_payload_path.read_text(encoding="utf-8"))
     serialized = json.dumps(payload, ensure_ascii=False)
+    generic_serialized = json.dumps(generic_payload, ensure_ascii=False)
     assert html is None
     assert CAFEF_FINANCIAL_TIMEOUT_WARNING in warnings
     assert payload["source"] == "CafeF tài chính"
@@ -338,8 +475,13 @@ def test_cafef_financial_timeout_writes_specific_debug_artifact(monkeypatch, tmp
     assert payload["phase"] == "page.goto"
     assert payload["fallback_used"] is True
     assert payload["report_blocked"] is False
+    assert generic_payload["source"] == "CafeF tài chính"
+    assert generic_payload["error_type"] == "PlaywrightTimeoutError"
+    assert generic_payload["cleanup_completed"] is True
     assert "request-token" not in serialized
     assert "sk-secret" not in serialized
+    assert "request-token" not in generic_serialized
+    assert "sk-secret" not in generic_serialized
 
 
 def test_failed_playwright_source_becomes_data_source_status(tmp_path):

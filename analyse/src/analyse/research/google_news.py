@@ -22,6 +22,7 @@ from analyse.research.base import normalize_domain
 from analyse.research.base import parse_datetime_for_sort
 from analyse.research.base import parse_datetime_to_iso
 from analyse.research.base import strip_html
+from analyse.research.research_query_builder import ResearchQueryBuilder
 from analyse.schemas.research import ResearchItem
 
 
@@ -45,6 +46,7 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
         self.domain_filter = normalize_domain(domain_filter)
         self.query_suffixes = query_suffixes or []
         self._cache_dir = Path(self.settings.research_cache_dir)
+        self.query_builder = ResearchQueryBuilder(self.settings)
 
     async def search(self, symbol: str, company: str | None = None) -> list[ResearchItem]:
         if not self.settings.research_google_news_rss_enabled:
@@ -62,30 +64,23 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
 
         if not items and errors:
             raise RuntimeError("; ".join(errors[:3]))
-        return self._deduplicate(items)
+        max_items = max(1, int(getattr(self.settings, "google_news_rss_max_items", 15) or 15))
+        return self._deduplicate(items)[:max_items]
 
     def _build_queries(self, *, symbol: str, company: str | None = None) -> list[str]:
         clean_symbol = symbol.strip().upper()
         clean_company = (company or "").strip()
-        domain = f" site:{self.domain_filter}" if self.domain_filter else ""
-        queries = [
-            f"{clean_symbol} cổ phiếu{domain}",
-            f"{clean_symbol} kết quả kinh doanh{domain}",
-            f"{clean_symbol} cổ tức{domain}",
-            f"{clean_symbol} khuyến nghị cổ phiếu{domain}",
-        ]
-        if clean_symbol == "HPG":
-            queries.extend(
-                [
-                    f"{clean_symbol} thép giá thép{domain}",
-                    f"{clean_symbol} HRC quặng sắt{domain}",
-                    f"{clean_symbol} đầu tư công xây dựng{domain}",
-                ]
-            )
-        if clean_company:
-            queries.insert(1, f"{clean_symbol} {clean_company}{domain}")
+        queries = self.query_builder.build_queries(
+            symbol=clean_symbol,
+            company_name=clean_company,
+            domains=[self.domain_filter] if self.domain_filter else None,
+            max_queries=max(6, int(getattr(self.settings, "source_backed_research_max_articles", 20) or 20)),
+        )
         for suffix in self.query_suffixes:
-            queries.append(f"{clean_symbol} {suffix}{domain}".strip())
+            query = f"{clean_symbol} {suffix}".strip()
+            if self.domain_filter:
+                query = f"{query} site:{self.domain_filter}"
+            queries.append(query)
 
         unique: list[str] = []
         seen: set[str] = set()
@@ -98,7 +93,9 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
 
     def _rss_url(self, query: str) -> str:
         encoded = quote_plus(query)
-        return f"https://news.google.com/rss/search?q={encoded}&hl=vi&gl=VN&ceid=VN:vi"
+        language = str(getattr(self.settings, "google_news_rss_language", "vi") or "vi")
+        country = str(getattr(self.settings, "google_news_rss_country", "VN") or "VN")
+        return f"https://news.google.com/rss/search?q={encoded}&hl={language}&gl={country}&ceid={country}:{language}"
 
     async def _fetch_with_cache(self, url: str) -> str:
         cache_path = self._cache_path(url)
@@ -332,6 +329,13 @@ class GoogleNewsResearchAdapter(BaseResearchAdapter):
             "tinnhanhchungkhoan.vn": "Tin nhanh chứng khoán",
             "vneconomy.vn": "VnEconomy",
             "bnews.vn": "BNews",
+            "vietnambiz.vn": "VietnamBiz",
+            "ndh.vn": "NDH",
+            "fireant.vn": "FireAnt",
+            "stockbiz.vn": "StockBiz",
+            "hsx.vn": "HOSE",
+            "hnx.vn": "HNX",
+            "ssc.gov.vn": "Ủy ban Chứng khoán Nhà nước",
         }
         for suffix, source_name in mapping.items():
             if domain.endswith(suffix):

@@ -132,4 +132,4 @@ def test_sanitize_source_detail_rewrites_known_technical_details():
     ) == "Đã ghi nhận 9 mã peer cùng nhóm ngành để phục vụ so sánh."
     assert sanitize_source_detail_for_user(
         {"name": "CafeF BCTC", "detail": "https://cafef.vn/du-lieu/hose/vcb-tai-chinh.chn; periods=0"}
-    ) == "Báo cáo vẫn dùng nguồn BCTC đã chuẩn hóa khác nếu có."
+    ) == "CafeF đã được kiểm tra nhưng không có chỉ tiêu tài chính đủ tin cậy để bù vào dữ liệu hợp nhất."

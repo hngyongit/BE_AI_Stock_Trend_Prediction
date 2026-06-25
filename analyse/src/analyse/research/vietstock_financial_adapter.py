@@ -23,13 +23,12 @@ from analyse.utils.datetime_utils import now_iso
 from analyse.utils.playwright_safe import PlaywrightTimeoutError
 from analyse.utils.playwright_safe import TargetClosedError
 from analyse.utils.playwright_safe import cancel_pending_tasks_safely
-from analyse.utils.playwright_safe import close_playwright_objects_safely
+from analyse.utils.playwright_safe import cleanup_playwright_runtime_safely
 from analyse.utils.playwright_safe import gather_safely
 from analyse.utils.playwright_safe import is_playwright_timeout_error
 from analyse.utils.playwright_safe import is_target_closed_error
-from analyse.utils.playwright_safe import remove_playwright_listener_safely
 from analyse.utils.playwright_safe import safe_playwright_error_message
-from analyse.utils.playwright_safe import save_playwright_error_debug
+from analyse.utils.debug_scrub import scrub_debug_payload, scrub_debug_text
 from analyse.utils.symbol_utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
@@ -190,23 +189,20 @@ class PlaywrightVietstockRenderer:
                 ],
             )
         finally:
-            if response_handler is not None:
-                remove_playwright_listener_safely(page, "response", response_handler, label=label)
-            logger.info("[%s] pending tasks count=%s", label, len([task for task in pending_tasks if not task.done()]))
-            await cancel_pending_tasks_safely(pending_tasks, label=label)
-            await close_playwright_objects_safely(page=page, context=context, browser=browser, label=label)
-            if debug_error is not None:
-                save_playwright_error_debug(
-                    self.settings,
-                    source="Vietstock BCTC",
-                    url=url,
-                    slug="vietstock_bctc",
-                    error=debug_error,
-                    phase=debug_phase,
-                    pending_tasks_count=len([task for task in pending_tasks if not task.done()]),
-                    cleanup_completed=True,
-                )
-            logger.info("[%s] cleanup completed", label)
+            await cleanup_playwright_runtime_safely(
+                page=page,
+                context=context,
+                browser=browser,
+                pending_tasks=pending_tasks,
+                response_handler=response_handler,
+                label=label,
+                debug_settings=self.settings,
+                debug_source="Vietstock BCTC",
+                debug_url=url,
+                debug_slug="vietstock_bctc",
+                debug_error=debug_error,
+                debug_phase=debug_phase,
+            )
 
     def _safe_wait_until(self, value: str | None) -> str:
         wait_until = (value or "domcontentloaded").strip().lower()
@@ -475,8 +471,11 @@ class VietstockFinancialAdapter:
                 if index >= len(row):
                     continue
                 period_key = meta["period"]
+                parsed_value = self._parse_number(row[index])
+                if parsed_value is None:
+                    continue
                 periods_by_label.setdefault(period_key, dict(meta))
-                periods_by_label[period_key][field] = self._parse_number(row[index])
+                self._assign_period_field(periods_by_label[period_key], field, parsed_value)
 
     def _parse_json_payloads(self, html_text: str, periods_by_label: dict[str, dict[str, Any]]) -> None:
         for match in re.finditer(
@@ -524,7 +523,7 @@ class VietstockFinancialAdapter:
                 meta = self._parse_period(key)
                 if meta and self._parse_number(value) is not None:
                     periods_by_label.setdefault(meta["period"], dict(meta))
-                    periods_by_label[meta["period"]][field] = self._parse_number(value)
+                    self._assign_period_field(periods_by_label[meta["period"]], field, self._parse_number(value))
 
         period_text = self._first_text(record, "period", "periodName", "reportPeriod", "termName", "reportTermName", "quarterName")
         meta = self._parse_period(period_text or "")
@@ -538,13 +537,13 @@ class VietstockFinancialAdapter:
             if field:
                 numeric_value = self._first_numeric(record, "value", "amount", "val", "data", "number", "currentValue")
                 if numeric_value is not None:
-                    periods_by_label[meta["period"]][field] = numeric_value
+                    self._assign_period_field(periods_by_label[meta["period"]], field, numeric_value)
             for key, value in record.items():
                 mapped_key = self._map_json_key_to_field(key)
                 if mapped_key:
                     parsed = self._parse_number(value)
                     if parsed is not None:
-                        periods_by_label[meta["period"]][mapped_key] = parsed
+                        self._assign_period_field(periods_by_label[meta["period"]], mapped_key, parsed)
 
     def _map_json_key_to_field(self, key: Any) -> str | None:
         normalized = self._normalize_text(str(key or ""))
@@ -562,11 +561,20 @@ class VietstockFinancialAdapter:
             "totalliabilities": "total_liabilities",
             "equity": "equity",
             "cash": "cash",
+            "cashandequivalents": "cash_and_equivalents",
             "inventory": "inventory",
+            "shorttermdebt": "short_term_debt",
+            "longtermdebt": "long_term_debt",
+            "operatingcashflow": "operating_cash_flow",
+            "investingcashflow": "investing_cash_flow",
+            "financingcashflow": "financing_cash_flow",
             "netinterestincome": "net_interest_income",
             "interestincome": "interest_income",
             "interestexpense": "interest_expense",
             "netfeeincome": "net_fee_income",
+            "tradingincome": "trading_income",
+            "otherincome": "other_income",
+            "operatingexpenses": "operating_expenses",
             "preprovisionoperatingprofit": "pre_provision_operating_profit",
             "creditprovisionexpense": "credit_provision_expense",
             "customerloans": "customer_loans",
@@ -574,6 +582,8 @@ class VietstockFinancialAdapter:
             "nplratio": "npl_ratio",
             "nim": "nim",
             "casa": "casa_ratio",
+            "casaratio": "casa_ratio",
+            "cir": "cir",
             "roe": "roe",
             "roa": "roa",
             "pe": "pe",
@@ -622,7 +632,8 @@ class VietstockFinancialAdapter:
             if len(values) < 1:
                 continue
             for index, value in enumerate(values[: len(period_meta)]):
-                periods_by_label[period_meta[index]["period"]][field] = value
+                if value is not None:
+                    self._assign_period_field(periods_by_label[period_meta[index]["period"]], field, value)
 
         self._parse_fragmented_text_grid(lines, period_meta, periods_by_label)
 
@@ -652,7 +663,15 @@ class VietstockFinancialAdapter:
                     break
                 cursor += 1
             for value_index, value in enumerate(values[: len(period_meta)]):
-                periods_by_label[period_meta[value_index]["period"]][field] = value
+                if value is not None:
+                    self._assign_period_field(periods_by_label[period_meta[value_index]["period"]], field, value)
+
+    def _assign_period_field(self, period: dict[str, Any], field: str, value: float | None) -> None:
+        if value is None:
+            return
+        period[field] = value
+        if field == "cash_and_equivalents":
+            period.setdefault("cash", value)
 
     def _find_period_columns(self, row: list[str]) -> list[tuple[int, dict[str, Any]]]:
         columns: list[tuple[int, dict[str, Any]]] = []
@@ -716,7 +735,17 @@ class VietstockFinancialAdapter:
         normalized = self._normalize_text(label)
         if not normalized:
             return None
+        compact_label = re.sub(r"[^a-z0-9]", "", normalized)
         ratio_context = any(token in normalized for token in ("ty suat", "ty so", "chi so", "roa", "roaa", "roe", "roea", "p/e", "p/b"))
+        if "doanhthuthu" in compact_label and not ratio_context:
+            return "revenue"
+        if (
+            ("luchuyntien" in compact_label or "luchuyntin" in compact_label)
+            and ("hdkd" in compact_label or "hkd" in compact_label or "kinhdoanh" in compact_label)
+        ):
+            return "operating_cash_flow"
+        if "novaynganhan" in compact_label or ("nvay" in compact_label and "ngnhn" in compact_label):
+            return "short_term_debt"
         if ratio_context:
             if "no vay tren von chu so huu" in normalized:
                 return "debt_to_equity"
@@ -787,14 +816,22 @@ class VietstockFinancialAdapter:
             ("ty so no vay tren von chu so huu", "debt_to_equity"),
             ("tai san ngan han khac", "other_current_assets"),
             ("tai san ngan han", "current_assets"),
-            ("tien va cac khoan tuong duong tien", "cash"),
+            ("tien va cac khoan tuong duong tien", "cash_and_equivalents"),
+            ("tien va tuong duong tien", "cash_and_equivalents"),
+            ("tien", "cash"),
             ("cac khoan dau tu tai chinh ngan han", "short_term_investments"),
             ("cac khoan phai thu ngan han", "short_term_receivables"),
             ("hang ton kho", "inventory"),
+            ("vay va no thue tai chinh ngan han", "short_term_debt"),
+            ("vay ngan han", "short_term_debt"),
+            ("no vay ngan han", "short_term_debt"),
             ("tai san dai han", "long_term_assets"),
             ("tai san co dinh", "fixed_assets"),
             ("bat dong san dau tu", "investment_properties"),
             ("cac khoan dau tu tai chinh dai han", "long_term_investments"),
+            ("vay va no thue tai chinh dai han", "long_term_debt"),
+            ("vay dai han", "long_term_debt"),
+            ("no vay dai han", "long_term_debt"),
             ("tong cong tai san", "total_assets"),
             ("no phai tra", "total_liabilities"),
             ("no ngan han", "current_liabilities"),
@@ -805,11 +842,24 @@ class VietstockFinancialAdapter:
             ("loi nhuan sau thue chua phan phoi", "retained_earnings"),
             ("tong cong nguon von", "total_capital"),
             ("tong nguon von", "total_capital"),
+            ("luu chuyen tien thuan tu hoat dong kinh doanh", "operating_cash_flow"),
+            ("luu chuyen tien thuan tu hd kinh doanh", "operating_cash_flow"),
+            ("luu chuyen tien thuan tu hdkd", "operating_cash_flow"),
+            ("luu chuyen tien tu hoat dong kinh doanh", "operating_cash_flow"),
+            ("luu chuyen tien tu hdkd", "operating_cash_flow"),
+            ("luu chuyen tien thuan tu hoat dong dau tu", "investing_cash_flow"),
+            ("luu chuyen tien thuan tu hd dau tu", "investing_cash_flow"),
+            ("luu chuyen tien tu hoat dong dau tu", "investing_cash_flow"),
+            ("luu chuyen tien thuan tu hoat dong tai chinh", "financing_cash_flow"),
+            ("luu chuyen tien thuan tu hd tai chinh", "financing_cash_flow"),
+            ("luu chuyen tien tu hoat dong tai chinh", "financing_cash_flow"),
             ("thu nhap lai thuan", "net_interest_income"),
             ("thu nhap lai va cac khoan thu nhap tuong tu", "interest_income"),
             ("chi phi lai va cac chi phi tuong tu", "interest_expense"),
             ("lai/lo thuan tu hoat dong dich vu", "net_fee_income"),
             ("lai lo thuan tu hoat dong dich vu", "net_fee_income"),
+            ("thu nhap thuan tu hoat dong dich vu", "net_fee_income"),
+            ("lai lo thuan tu hoat dong kinh doanh ngoai hoi", "trading_income"),
             ("lai/lo thuan tu hoat dong kinh doanh ngoai hoi", "fx_trading_income"),
             ("lai lo thuan tu hoat dong kinh doanh ngoai hoi", "fx_trading_income"),
             ("lai/lo thuan tu mua ban chung khoan kinh doanh", "trading_securities_income"),
@@ -817,7 +867,10 @@ class VietstockFinancialAdapter:
             ("lai/lo thuan tu mua ban chung khoan dau tu", "investment_securities_income"),
             ("lai lo thuan tu mua ban chung khoan dau tu", "investment_securities_income"),
             ("thu nhap tu gop von mua co phan", "dividend_income"),
+            ("thu nhap khac", "other_income"),
+            ("lai lo thuan tu hoat dong khac", "other_income"),
             ("chi phi hoat dong", "operating_expense"),
+            ("tong chi phi hoat dong", "operating_expenses"),
             ("loi nhuan thuan tu hoat dong kinh doanh truoc chi phi du phong rui ro tin dung", "pre_provision_operating_profit"),
             ("chi phi du phong rui ro tin dung", "credit_provision_expense"),
             ("tong loi nhuan truoc thue", "profit_before_tax"),
@@ -843,6 +896,9 @@ class VietstockFinancialAdapter:
             ("ty le bao phu no xau", "loan_loss_coverage"),
             ("nim", "nim"),
             ("casa", "casa_ratio"),
+            ("ty le casa", "casa_ratio"),
+            ("cir", "cir"),
+            ("ty le chi phi tren thu nhap", "cir"),
             ("roe", "roe"),
             ("roa", "roa"),
             ("eps", "eps"),
@@ -975,7 +1031,7 @@ class VietstockFinancialAdapter:
         try:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f"{normalize_symbol(symbol)}_vietstock_bctc_rendered.html").write_text(html_text, encoding="utf-8")
+            (debug_dir / f"{normalize_symbol(symbol)}_vietstock_bctc_rendered.html").write_text(scrub_debug_text(html_text), encoding="utf-8")
         except Exception:
             return
 
@@ -1009,11 +1065,11 @@ class VietstockFinancialAdapter:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
             (debug_dir / f"{normalize_symbol(symbol)}_vietstock_bctc_extraction.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(scrub_debug_payload(payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             (debug_dir / f"{normalize_symbol(symbol)}_financial_mapping_debug.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(scrub_debug_payload(payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception:

@@ -7,6 +7,7 @@ from analyse.research.cafef_company_adapter import build_cafef_company_url
 from analyse.research.cafef_company_adapter import clean_company_name
 from analyse.research.cafef_financial_adapter import CAFEF_FINANCIAL_TIMEOUT_WARNING
 from analyse.research.cafef_financial_adapter import CafeFFinancialAdapter
+from analyse.research.cafef_financial_adapter import build_cafef_financial_url
 from analyse.services.stock_data_service import StockDataService
 
 
@@ -332,6 +333,14 @@ def test_cafef_financial_adapter_builds_url_and_extracts_bank_metrics(tmp_path):
     assert latest["roa"] == 1.6
 
 
+def test_cafef_financial_url_builder_lowercases_symbol_exchange():
+    url = build_cafef_financial_url(" VCB ", " HOSE ")
+
+    assert url == "https://cafef.vn/du-lieu/hose/vcb-tai-chinh.chn"
+    assert "/HOSE/" not in url
+    assert "/VCB-" not in url
+
+
 def test_cafef_financial_adapter_extracts_nonbank_metrics(tmp_path):
     adapter = CafeFFinancialAdapter(_settings(tmp_path), http_client=FakeHttpClient(CAFEF_NONBANK_FINANCIAL_HTML), browser_renderer=FakeRenderer())
 
@@ -351,6 +360,78 @@ def test_cafef_financial_adapter_extracts_nonbank_metrics(tmp_path):
     assert latest["pb"] == 1.48
     assert latest["roe"] == 6.64
     assert latest["roa"] == 3.48
+
+
+def test_cafef_financial_parser_extracts_period_headers_metric_rows_and_audit(tmp_path):
+    html = """
+    <html><body>
+      <div>Đơn vị: Tỷ đồng</div>
+      <table>
+        <tr><th>Chỉ tiêu</th><th>Q1/2026</th><th>Q4/2025</th></tr>
+        <tr><td>Doanh thu thuần</td><td>1,200</td><td>1,100</td></tr>
+        <tr><td>Lưu chuyển tiền thuần từ HĐKD</td><td>300</td><td></td></tr>
+        <tr><td>Nợ vay ngắn hạn</td><td>250</td><td>240</td></tr>
+        <tr><td>Dòng chưa map CafeF</td><td>42</td><td>41</td></tr>
+      </table>
+    </body></html>
+    """
+    adapter = CafeFFinancialAdapter(_settings(tmp_path), http_client=FakeHttpClient(html), browser_renderer=FakeRenderer())
+
+    result = adapter.parse_html(html, source_url="https://cafef.vn/du-lieu/hose/hpg-tai-chinh.chn")
+
+    latest = result["periods"][0]
+    assert result["status"] == "success"
+    assert latest["period"] == "Q1/2026"
+    assert latest["revenue"] == 1200
+    assert latest["operating_cash_flow"] == 300
+    assert latest["short_term_debt"] == 250
+    assert result["audit"]["tables_found"] == 1
+    assert "Q1/2026" in result["audit"]["raw_period_headers"]
+    assert result["audit"]["raw_metric_rows_count"] == 4
+    assert any(item["field"] == "operating_cash_flow" for item in result["audit"]["mapped_metrics"])
+    assert "Dòng chưa map CafeF" in result["audit"]["unmapped_metrics"]
+
+
+def test_cafef_financial_parser_handles_blank_cells_safely(tmp_path):
+    html = """
+    <html><body><table>
+      <tr><th>Chỉ tiêu</th><th>Q1/2026</th><th>Q4/2025</th></tr>
+      <tr><td>Doanh thu thuần</td><td>1,200</td><td></td></tr>
+      <tr><td>Lợi nhuận sau thuế</td><td>-</td><td>100</td></tr>
+      <tr><td>Tổng cộng tài sản</td><td>2,000</td><td>1,900</td></tr>
+      <tr><td>Vốn chủ sở hữu</td><td>800</td><td>700</td></tr>
+    </table></body></html>
+    """
+    adapter = CafeFFinancialAdapter(_settings(tmp_path), http_client=FakeHttpClient(html), browser_renderer=FakeRenderer())
+
+    result = adapter.parse_html(html, source_url="https://cafef.vn/du-lieu/hose/hpg-tai-chinh.chn")
+
+    latest = result["periods"][0]
+    assert latest["revenue"] == 1200
+    assert "profit_after_tax" not in latest
+    assert latest["total_assets"] == 2000
+
+
+def test_cafef_financial_parser_rejects_suspicious_bank_values(tmp_path):
+    html = """
+    <html><body><table>
+      <tr><th>Chỉ tiêu</th><th>Q1/2026</th></tr>
+      <tr><td>Thu nhập lãi thuần</td><td>10,000</td></tr>
+      <tr><td>Lợi nhuận sau thuế</td><td>8,000</td></tr>
+      <tr><td>Tổng tài sản</td><td>10</td></tr>
+      <tr><td>Cho vay khách hàng</td><td>1,000,000</td></tr>
+      <tr><td>Tiền gửi của khách hàng</td><td>900,000</td></tr>
+      <tr><td>ROE</td><td>120</td></tr>
+    </table></body></html>
+    """
+    adapter = CafeFFinancialAdapter(_settings(tmp_path), http_client=FakeHttpClient(html), browser_renderer=FakeRenderer())
+
+    result = adapter.parse_html(html, source_url="https://cafef.vn/du-lieu/hose/vcb-tai-chinh.chn")
+    latest = result["periods"][0]
+
+    assert "total_assets" not in latest
+    assert "roe" not in latest
+    assert latest["_suspicious_financial_fields"]
 
 
 def test_cafef_financial_period_only_data_is_not_loaded(tmp_path):
@@ -383,6 +464,23 @@ def test_cafef_financial_timeout_returns_insufficient_payload(tmp_path):
     assert result["periods"] == []
     assert result["source"] == "CafeF tài chính"
     assert CAFEF_FINANCIAL_TIMEOUT_WARNING in result["warnings"]
+
+
+def test_cafef_financial_debug_audit_does_not_expose_secrets(tmp_path):
+    settings = _settings(
+        tmp_path,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+        EXTERNAL_DATA_DEBUG_SAVE_EXTRACTION_JSON=True,
+        CAFEF_FINANCIAL_URL_TEMPLATE="https://cafef.vn/du-lieu/{exchange}/{symbol}-tai-chinh.chn?api_key=SECRET",
+    )
+    adapter = CafeFFinancialAdapter(settings, http_client=FakeHttpClient(CAFEF_NONBANK_FINANCIAL_HTML), browser_renderer=FakeRenderer())
+
+    asyncio.run(adapter.fetch("HPG", exchange="HOSE"))
+
+    audit_path = tmp_path / "reports" / "debug" / "HPG_cafef_financial_audit.json"
+    assert audit_path.exists()
+    text = audit_path.read_text(encoding="utf-8")
+    assert "SECRET" not in text
 
 
 def test_cafef_financial_ratio_only_data_is_partial_not_success(tmp_path):

@@ -299,7 +299,7 @@ def test_market_context_maps_aliases_to_user_ready_cards():
     assert cards["Chỉ số"] == "VN-Index 1,857.91"
     assert cards["Biến động"] == "0.6%"
     assert cards["Thanh khoản"] == "517.6 triệu cp"
-    assert cards["Giá trị giao dịch"] == "14,597.1 tỷ đồng"
+    assert cards["Giá trị giao dịch"] == "14.597,1 tỷ đồng"
     assert cards["Trạng thái"] == "Khá tích cực"
     assert cards["Điểm sức khỏe thị trường"] == "65/100"
 

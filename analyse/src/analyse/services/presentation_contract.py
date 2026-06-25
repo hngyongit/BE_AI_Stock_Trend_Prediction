@@ -5,10 +5,12 @@ from typing import Any
 
 
 STATUS_LABELS = {
+    "available": "Đã ghi nhận",
     "success": "Đã ghi nhận",
     "partial": "Ghi nhận một phần",
     "insufficient": "Chưa đủ dữ liệu",
     "failed": "Chưa lấy được",
+    "missing": "Chưa xác minh",
     "not_configured": "Chưa cấu hình",
     "disabled": "Chưa cấu hình",
     "skipped": "Bỏ qua",
@@ -97,6 +99,8 @@ def to_user_facing_source_name(raw_name: str, raw_type: str | None = None) -> st
         "external_research": "Tin tức và nghiên cứu bên ngoài",
         "external research": "Tin tức và nghiên cứu bên ngoài",
         "vietstock_cafef_google_news": "Tin tức và nghiên cứu bên ngoài",
+        "official_disclosure": "Nguồn công bố chính thức",
+        "nguồn công bố chính thức": "Nguồn công bố chính thức",
         "google_news_rss": "Google News",
         "google news rss": "Google News",
         "vietstock_via_google_news_rss": "Vietstock qua Google News",
@@ -106,6 +110,22 @@ def to_user_facing_source_name(raw_name: str, raw_type: str | None = None) -> st
         return mapping[key]
     if type_key in mapping:
         return mapping[type_key]
+    if key == "cafef":
+        if any(marker in type_key for marker in ("financial", "bctc", "finance")):
+            return "CafeF tài chính"
+        if any(marker in type_key for marker in ("company", "profile", "overview", "ownership", "leadership")):
+            return "CafeF thông tin doanh nghiệp"
+        if any(marker in type_key for marker in ("research", "news", "rss")):
+            return "CafeF qua Google News"
+        return "CafeF thông tin doanh nghiệp"
+    if key == "vietstock":
+        if any(marker in type_key for marker in ("financial", "bctc", "finance")):
+            return "Vietstock Finance BCTC"
+        if any(marker in type_key for marker in ("peer", "industry", "comparison")):
+            return "Vietstock peer cùng ngành"
+        if any(marker in type_key for marker in ("research", "news", "rss")):
+            return "Vietstock qua Google News"
+        return "Vietstock Finance BCTC"
     if "/api/" in key or key.startswith("backend "):
         return "Dữ liệu hệ thống"
     return text or "Nguồn dữ liệu"
@@ -141,15 +161,19 @@ def sanitize_source_detail_for_user(source: Any) -> str:
         return "Dùng cho phần tổng quan doanh nghiệp, ban lãnh đạo hoặc sở hữu nếu trích xuất được."
     if name == "CafeF tài chính":
         periods = _extract_int(detail, "periods")
+        filled = _extract_int(detail, "filled_count") or 0
+        usable = _extract_int(detail, "usable_count") or 0
         if status == "skipped":
             return "CafeF tài chính không được gọi do cấu hình, lựa chọn người dùng hoặc chính sách giới hạn nguồn ngoài."
         if status == "failed":
             return "Báo cáo vẫn tiếp tục với các nguồn tài chính đã xác thực khác."
+        if filled > 0:
+            return f"CafeF đã bù {filled} chỉ tiêu/kỳ tài chính còn thiếu vào dữ liệu hợp nhất."
+        if usable > 0:
+            return f"CafeF cung cấp {usable} chỉ tiêu để đối chiếu, nhưng không ghi đè dữ liệu ưu tiên cao hơn."
         if periods == 0 or status == "insufficient":
-            return "Báo cáo vẫn dùng nguồn BCTC đã chuẩn hóa khác nếu có."
-        if status == "partial":
-            return "Dùng như nguồn tham chiếu bổ sung cho BCTC và chỉ số tài chính."
-        return "Dùng như nguồn tham chiếu bổ sung cho BCTC và chỉ số tài chính."
+            return "CafeF đã được kiểm tra nhưng không có chỉ tiêu tài chính đủ tin cậy để bù vào dữ liệu hợp nhất."
+        return "CafeF tài chính được dùng để đối chiếu BCTC và chỉ số tài chính."
     if name == "Vietstock Finance BCTC":
         periods = _extract_int(detail, "periods")
         if status == "success" and (periods is None or periods > 0):
@@ -171,6 +195,8 @@ def sanitize_source_detail_for_user(source: Any) -> str:
         if status == "disabled":
             return "Nguồn tin tức/nghiên cứu bên ngoài chưa được bật cho lần chạy này."
         return "Chỉ dùng làm bằng chứng ngữ cảnh, không tạo số liệu tài chính mới."
+    if name == "Nguồn công bố chính thức":
+        return "Chỉ dùng các công bố/nguồn chính thống tìm được làm bằng chứng kiểm chứng, không tạo số liệu mới."
     if not _contains_technical_detail(detail_lower) and detail.strip():
         return detail.strip()
     return "Nguồn đã được đối chiếu ở mức phù hợp với dữ liệu hiện có."
@@ -198,6 +224,10 @@ def normalize_source_status(source: Any) -> str:
         peers = _extract_int(detail, "normalized_peers")
         if peers == 0 and status not in {"failed", "disabled"}:
             return "insufficient"
+    if status == "available":
+        return "success"
+    if status == "missing":
+        return "insufficient"
     if status in STATUS_LABELS:
         return status
     return "partial"
@@ -217,7 +247,7 @@ def sanitize_data_source_for_user(source: Any) -> dict[str, Any] | None:
     summary = _source_summary_for_user(name, status, data)
     detail = sanitize_source_detail_for_user({**data, "name": name, "status": status, "type": source_type})
 
-    return {
+    row = {
         "name": name,
         "type": source_type,
         "category": category,
@@ -228,6 +258,11 @@ def sanitize_data_source_for_user(source: Any) -> dict[str, Any] | None:
         "source_type": source_type,
         "debug_detail": None,
     }
+    if data.get("evidence_count") is not None:
+        row["evidence_count"] = data.get("evidence_count")
+    if data.get("last_crawled_at") is not None:
+        row["last_crawled_at"] = data.get("last_crawled_at")
+    return row
 
 
 def sanitize_data_source_statuses(sources: Any) -> list[dict[str, Any]]:
@@ -320,6 +355,8 @@ def _source_type_for_user(name: str, raw_type: str) -> str:
         return "peer"
     if name in {"Tin tức và nghiên cứu bên ngoài", "Google News", "Vietstock qua Google News", "CafeF qua Google News"}:
         return "external_research"
+    if name == "Nguồn công bố chính thức":
+        return "official_disclosure"
     clean = _source_key(raw_type)
     if clean and not _contains_technical_detail(clean):
         return clean.replace(" ", "_")
@@ -339,6 +376,8 @@ def _source_category_for_user(name: str, source_type: str) -> str:
         return "So sánh ngành"
     if source_type == "external_research":
         return "Bối cảnh thông tin"
+    if source_type == "official_disclosure":
+        return "Nguồn chính thống"
     return "Nguồn dữ liệu"
 
 
@@ -351,10 +390,16 @@ def _source_summary_for_user(name: str, status: str, source: dict[str, Any]) -> 
     if name == "CafeF thông tin doanh nghiệp":
         return "Đã đối chiếu hồ sơ doanh nghiệp, ban lãnh đạo hoặc sở hữu." if status in {"success", "partial"} else "CafeF chưa cung cấp đủ hồ sơ doanh nghiệp có thể chuẩn hóa."
     if name == "CafeF tài chính":
+        filled = _extract_int(detail, "filled_count") or 0
+        usable = _extract_int(detail, "usable_count") or 0
         if status == "skipped":
             return "CafeF tài chính không được gọi do cấu hình hoặc chính sách giới hạn nguồn ngoài."
         if status == "failed":
             return "CafeF tài chính tải quá thời gian cho phép hoặc chưa phản hồi trong lần chạy này."
+        if filled > 0:
+            return "Đã ghi nhận dữ liệu tài chính từ CafeF để bổ sung/đối chiếu BCTC."
+        if usable > 0:
+            return "CafeF cung cấp một phần dữ liệu tài chính có thể đối chiếu."
         if status == "insufficient" or _extract_int(detail, "periods") == 0:
             return "CafeF chưa cung cấp đủ kỳ tài chính có thể chuẩn hóa trong lần chạy này."
         return "Đã đối chiếu thêm dữ liệu tài chính từ CafeF."
@@ -367,4 +412,6 @@ def _source_summary_for_user(name: str, status: str, source: dict[str, Any]) -> 
         return "Chưa đủ peer cùng ngành có thể chuẩn hóa trong lần chạy này."
     if name in {"Tin tức và nghiên cứu bên ngoài", "Google News", "Vietstock qua Google News", "CafeF qua Google News"}:
         return "Đã ghi nhận các tin tức/nghiên cứu phù hợp." if status == "success" else "Tin tức/nghiên cứu bên ngoài chưa đủ độ phủ."
+    if name == "Nguồn công bố chính thức":
+        return "Đã đối chiếu nguồn công bố chính thức phù hợp." if status in {"success", "partial"} else "Chưa tìm được nguồn công bố chính thức phù hợp trong lần chạy này."
     return "Nguồn dữ liệu đã được đối chiếu."

@@ -22,13 +22,12 @@ from analyse.utils.datetime_utils import now_iso
 from analyse.utils.playwright_safe import PlaywrightTimeoutError
 from analyse.utils.playwright_safe import TargetClosedError
 from analyse.utils.playwright_safe import cancel_pending_tasks_safely
-from analyse.utils.playwright_safe import close_playwright_objects_safely
+from analyse.utils.playwright_safe import cleanup_playwright_runtime_safely
 from analyse.utils.playwright_safe import gather_safely
 from analyse.utils.playwright_safe import is_playwright_timeout_error
 from analyse.utils.playwright_safe import is_target_closed_error
-from analyse.utils.playwright_safe import remove_playwright_listener_safely
 from analyse.utils.playwright_safe import safe_playwright_error_message
-from analyse.utils.playwright_safe import save_playwright_error_debug
+from analyse.utils.debug_scrub import scrub_debug_payload, scrub_debug_text
 from analyse.utils.symbol_utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
@@ -161,23 +160,20 @@ class PlaywrightVietstockPeerRenderer:
             logger.warning("[%s] Playwright crawler failed safely: %s", label, exc, exc_info=True)
             return None, [f"Vietstock peer rendering failed: {exc.__class__.__name__}: {self._safe_error_message(exc)}"]
         finally:
-            if response_handler is not None:
-                remove_playwright_listener_safely(page, "response", response_handler, label=label)
-            logger.info("[%s] pending tasks count=%s", label, len([task for task in pending_tasks if not task.done()]))
-            await cancel_pending_tasks_safely(pending_tasks, label=label)
-            await close_playwright_objects_safely(page=page, context=context, browser=browser, label=label)
-            if debug_error is not None:
-                save_playwright_error_debug(
-                    self.settings,
-                    source="Vietstock peer",
-                    url=url,
-                    slug="vietstock_peer",
-                    error=debug_error,
-                    phase=debug_phase,
-                    pending_tasks_count=len([task for task in pending_tasks if not task.done()]),
-                    cleanup_completed=True,
-                )
-            logger.info("[%s] cleanup completed", label)
+            await cleanup_playwright_runtime_safely(
+                page=page,
+                context=context,
+                browser=browser,
+                pending_tasks=pending_tasks,
+                response_handler=response_handler,
+                label=label,
+                debug_settings=self.settings,
+                debug_source="Vietstock peer",
+                debug_url=url,
+                debug_slug="vietstock_peer",
+                debug_error=debug_error,
+                debug_phase=debug_phase,
+            )
 
     def _safe_wait_until(self, value: str | None) -> str:
         wait_until = (value or "domcontentloaded").strip().lower()
@@ -1178,7 +1174,7 @@ class VietstockPeerAdapter:
         try:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f"{normalize_symbol(symbol)}_vietstock_peer_rendered.html").write_text(html_text, encoding="utf-8")
+            (debug_dir / f"{normalize_symbol(symbol)}_vietstock_peer_rendered.html").write_text(scrub_debug_text(html_text), encoding="utf-8")
         except Exception:
             return
 
@@ -1188,7 +1184,7 @@ class VietstockPeerAdapter:
         try:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f"{normalize_symbol(symbol)}_vietstock_peer_raw.html").write_text(html_text or "", encoding="utf-8")
+            (debug_dir / f"{normalize_symbol(symbol)}_vietstock_peer_raw.html").write_text(scrub_debug_text(html_text or ""), encoding="utf-8")
         except Exception:
             return
 
@@ -1213,7 +1209,7 @@ class VietstockPeerAdapter:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
             (debug_dir / f"{normalize_symbol(symbol)}_vietstock_peer_request.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(scrub_debug_payload(payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception:
@@ -1270,22 +1266,24 @@ class VietstockPeerAdapter:
             debug_dir = Path(self.settings.report_output_dir) / "debug"
             debug_dir.mkdir(parents=True, exist_ok=True)
             (debug_dir / f"{normalize_symbol(symbol)}_vietstock_peer_tables.json").write_text(
-                json.dumps(tables_payload, ensure_ascii=False, indent=2),
+                json.dumps(scrub_debug_payload(tables_payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             (debug_dir / f"{normalize_symbol(symbol)}_vietstock_peer_extraction.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
+                json.dumps(scrub_debug_payload(payload), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             (debug_dir / f"{normalize_symbol(symbol)}_vietstock_peer_raw_rows.json").write_text(
                 json.dumps(
-                    {
+                    scrub_debug_payload(
+                        {
                         "source_url": source_url,
                         "tab_selected": payload["tab_selected"],
                         "headers_found": payload["headers_found"],
                         "raw_rows": payload["raw_rows"],
                         "rejected_rows": payload["rejected_rows"],
-                    },
+                        }
+                    ),
                     ensure_ascii=False,
                     indent=2,
                 ),
@@ -1293,13 +1291,15 @@ class VietstockPeerAdapter:
             )
             (debug_dir / f"{normalize_symbol(symbol)}_vietstock_peer_normalized.json").write_text(
                 json.dumps(
-                    {
+                    scrub_debug_payload(
+                        {
                         "source_url": source_url,
                         "tab_selected": payload["tab_selected"],
                         "normalized_rows": payload["normalized_rows"],
                         "final_valid_peers": peers,
                         "status": result.get("status"),
-                    },
+                        }
+                    ),
                     ensure_ascii=False,
                     indent=2,
                 ),

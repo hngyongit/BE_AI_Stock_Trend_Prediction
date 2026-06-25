@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from pathlib import Path
 
 from analyse.clients.backend_client import BackendClient
 from analyse.config.settings import Settings, get_settings
@@ -11,6 +9,7 @@ from analyse.providers.provider_factory import get_llm_provider
 from analyse.research.cafef_company_adapter import CafeFCompanyAdapter
 from analyse.research.cafef_financial_adapter import CafeFFinancialAdapter
 from analyse.research.research_service import ExternalResearchService
+from analyse.research.source_backed_enrichment_service import SourceBackedEnrichmentService
 from analyse.research.vietstock_financial_adapter import VietstockFinancialAdapter
 from analyse.research.vietstock_peer_adapter import VietstockPeerAdapter
 from analyse.schemas.common import ProviderName, api_error, api_success
@@ -28,15 +27,26 @@ from analyse.schemas.research import ExternalResearchContext
 from analyse.schemas.stock import StockAnalysisRequest, StockFetchAnalysisRequest
 from analyse.schemas.watchlist import WatchlistAnalysisRequest
 from analyse.services.html_service import HtmlService
+from analyse.services.ai_report_history_service import AiReportHistoryService, AiReportHistoryUnavailableError
 from analyse.services.config_diagnostic_service import ConfigDiagnosticService
+from analyse.services.financial_source_merge_service import FinancialSourceMergeService
 from analyse.services.markdown_service import MarkdownService
 from analyse.services.presentation_contract import build_data_source_debug_rows
 from analyse.services.presentation_contract import sanitize_data_source_statuses
+from analyse.services.report_forecast_normalizer import ReportForecastNormalizer
 from analyse.services.report_file_service import ReportFileService
+from analyse.services.report_missing_field_auditor import ReportMissingFieldAuditor
+from analyse.services.report_assembly_service import ReportAssemblyService
+from analyse.services.report_debug_service import ReportDebugService
+from analyse.services.numeric_fact_validation_service import NumericFactValidationResult, NumericFactValidationService
+from analyse.services.report_status_service import ReportStatusService
+from analyse.services.source_collection_coordinator import SourceCollectionCoordinator
 from analyse.services.stock_data_service import StockDataService
 from analyse.services.summary_service import SummaryService
+from analyse.services.user_identity_service import CurrentUserIdentity, UserIdentityMalformedError, UserIdentityService, UserIdentityUnauthorizedError
 from analyse.services.watchlist_service import WatchlistService
 from analyse.utils.datetime_utils import now_iso, timestamp_for_filename
+from analyse.utils.debug_scrub import scrub_debug_payload, scrub_debug_text
 from analyse.utils.symbol_utils import normalize_symbol
 
 logger = logging.getLogger(__name__)
@@ -50,20 +60,43 @@ class ReportService:
         settings: Settings | None = None,
         backend_client: BackendClient | None = None,
         research_service: ExternalResearchService | None = None,
+        user_identity_service: UserIdentityService | None = None,
+        history_service: AiReportHistoryService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.backend_client = backend_client or BackendClient(self.settings)
         self.research_service = research_service or ExternalResearchService(self.settings)
+        self.source_backed_enrichment_service = SourceBackedEnrichmentService(self.settings)
+        self.user_identity_service = user_identity_service or UserIdentityService(self.backend_client)
+        self.history_service = history_service or AiReportHistoryService(self.settings)
         self.cafef_company_adapter = CafeFCompanyAdapter(self.settings)
         self.cafef_financial_adapter = CafeFFinancialAdapter(self.settings)
         self.vietstock_financial_adapter = VietstockFinancialAdapter(self.settings)
         self.vietstock_peer_adapter = VietstockPeerAdapter(self.settings)
         self.watchlist_service = WatchlistService(self.settings)
         self.stock_data_service = StockDataService()
+        self.source_collection_coordinator = SourceCollectionCoordinator(
+            self.settings,
+            self.backend_client,
+            self.stock_data_service,
+            source_backed_enrichment_service=self.source_backed_enrichment_service,
+        )
+        self.financial_merge_service = FinancialSourceMergeService(self.settings, self.stock_data_service)
         self.summary_service = SummaryService(self.stock_data_service, settings=self.settings)
+        self.forecast_normalizer = ReportForecastNormalizer(self.settings)
+        self.report_debug_service = ReportDebugService(self.settings)
+        self.numeric_fact_validation_service = NumericFactValidationService()
+        self.report_assembly_service = ReportAssemblyService(
+            self.settings,
+            summary_service=self.summary_service,
+            forecast_normalizer=self.forecast_normalizer,
+            report_debug_service=self.report_debug_service,
+        )
         self.markdown_service = MarkdownService()
         self.html_service = HtmlService(self.settings)
         self.report_file_service = ReportFileService(self.settings.report_output_dir)
+        self.missing_field_auditor = ReportMissingFieldAuditor(self.settings)
+        self.status_service = ReportStatusService()
 
     def build_direct_stock_placeholder(self, payload: StockAnalysisRequest) -> dict:
         symbol = normalize_symbol(payload.symbol)
@@ -107,6 +140,32 @@ class ReportService:
                 details=[{"field": "Authorization", "message": "Authorization header là bắt buộc cho analyse-one."}],
             )
 
+        current_user: CurrentUserIdentity | None = None
+        if self.settings.enable_ai_report_history:
+            try:
+                current_user = await self.user_identity_service.resolve_current_user(user_token or "")
+            except UserIdentityUnauthorizedError:
+                return api_error(
+                    "Phiên đăng nhập đã hết hạn hoặc token không hợp lệ.",
+                    "AUTH_INVALID",
+                    code=401,
+                    details=[{"field": "Authorization", "message": "Backend từ chối token khi xác thực người dùng."}],
+                )
+            except UserIdentityMalformedError:
+                return api_error(
+                    "Không xác định được người dùng hiện tại từ Backend.",
+                    "CURRENT_USER_MALFORMED",
+                    code=502,
+                    details=[{"field": "current_user", "message": "Backend current-user response thiếu định danh người dùng."}],
+                )
+            except Exception as exc:
+                return api_error(
+                    "Không xác thực được người dùng hiện tại từ Backend.",
+                    "CURRENT_USER_UNAVAILABLE",
+                    code=502,
+                    details=[{"field": "current_user", "message": self._safe_error_detail(exc)}],
+                )
+
         try:
             watchlist_payload = await self.backend_client.get_watchlists(token=user_token)
             watchlist_items = self.watchlist_service.limit_items(self.watchlist_service.extract_items_from_backend_payload(watchlist_payload))
@@ -143,6 +202,11 @@ class ReportService:
                 code=403,
                 details=[{"field": "symbol", "message": f"{symbol} không nằm trong danh sách watchlists hợp lệ."}],
             )
+        matched_watchlist_item = self.watchlist_service.find_matching_item(
+            symbol,
+            requested_exchange=payload.scope_exchange,
+            allowed_items=watchlist_items,
+        )
 
         try:
             stock_detail, stock_source_warnings = await self._load_stock_detail_for_analysis(symbol, payload.scope_exchange, data_sources, user_token=user_token)
@@ -201,6 +265,23 @@ class ReportService:
             warnings=warnings,
         )
         summary = self._apply_request_risk_defaults(summary, payload)
+        source_backed_result = await self.source_collection_coordinator.collect_source_backed_enrichment(
+            symbol=symbol,
+            exchange=payload.scope_exchange,
+            stock_payload=stock_detail,
+            company_name=company,
+            summary=summary,
+            research_context=research_context,
+            token=user_token,
+            options=payload.options,
+        )
+        summary = source_backed_result.enriched_summary or summary
+        summary, _ = self.forecast_normalizer.normalize_summary(summary)
+        summary = self.report_assembly_service.refresh_summary_presentation(
+            summary=summary,
+            research_context=research_context,
+            warnings=warnings,
+        )
         self._save_market_context_debug(symbol, summary)
 
         selected_model = self._select_model_override(payload.model, warnings)
@@ -215,9 +296,43 @@ class ReportService:
             schema=LLMReportOutput.model_json_schema(),
         )
         warnings = self._merge_string_lists(warnings, llm_result.warnings)
+        provider_metadata = self.report_assembly_service.build_provider_metadata(
+            provider=provider_name,
+            model=llm_result.model,
+            status=llm_result.status,
+            latency_ms=llm_result.latency_ms,
+        )
         llm_markdown_content: str | None = None
         if llm_result.status == "success":
             summary, llm_markdown_content = self._merge_llm_output(summary, llm_result.data)
+        summary, mandatory_forecast_debug = self._enforce_mandatory_forecast_sections(
+            symbol,
+            summary,
+            research_context=research_context,
+        )
+        if mandatory_forecast_debug.get("fallback_used"):
+            warnings = self._merge_string_lists(
+                warnings,
+                ["Đã chuẩn hóa các phần kịch bản, checklist và kế hoạch hành động để bảo đảm báo cáo không bị rỗng."],
+            )
+        numeric_validation_result = self.numeric_fact_validation_service.validate_summary(
+            summary=summary,
+            source_payload={
+                "stock_detail": stock_detail,
+                "financials": {
+                    "bctc_3q": summary.get("bctc_3q"),
+                    "financials": summary.get("financials"),
+                    "financials_merged": summary.get("financials_merged"),
+                    "financial_balance": summary.get("financial_balance"),
+                    "financial_source_contributions": summary.get("financial_source_contributions"),
+                },
+                "data_sources": [source.model_dump() for source in data_sources],
+                "source_backed_evidence": summary.get("source_backed_evidence"),
+            },
+        )
+        summary = numeric_validation_result.payload
+        warnings = self._merge_string_lists(warnings, numeric_validation_result.warnings)
+        self._save_numeric_fact_validation_debug(symbol, numeric_validation_result)
 
         timestamp = timestamp_for_filename(self.settings.analyse_timezone)
         report_id = f"{symbol}_{payload.scope_exchange}_{timestamp}"
@@ -256,12 +371,7 @@ class ReportService:
                         summary,
                         markdown_content=markdown_content or "",
                         data_sources=html_data_sources,
-                        provider={
-                            "name": provider_name,
-                            "model": llm_result.model,
-                            "status": llm_result.status,
-                            "latency_ms": llm_result.latency_ms,
-                        },
+                        provider=provider_metadata,
                     )
                     html_output_path = self.report_file_service.write_html(report_id, html_content)
                 except Exception as exc:
@@ -282,7 +392,21 @@ class ReportService:
         research_warnings = self._string_list((research_context.flag_summary or {}).get("warnings"))
         warnings = self._merge_string_lists(warnings, research_warnings)
         user_data_sources = sanitize_data_source_statuses([source.model_dump() for source in data_sources])
+        user_data_sources = self._attach_evidence_counts(user_data_sources, summary)
         self._save_data_sources_debug(symbol, data_sources, user_data_sources)
+        source_status = self._aggregate_source_status(user_data_sources)
+        history_status = "pending" if self.settings.enable_ai_report_history else "disabled"
+        status_payload = self.status_service.build_report_status(
+            has_report_content=bool(summary),
+            source_warnings=warnings,
+            history_status=history_status,
+            source_status=source_status,
+        )
+        analysis_status = str(status_payload["analysis_status"])
+        history_status = str(status_payload["history_status"])
+        source_status = str(status_payload["source_status"])
+        report_status = str(status_payload["report_status"])
+        warnings = status_payload["warnings"]
 
         report = ReportGenerateResponse(
             data=ReportData(
@@ -293,7 +417,11 @@ class ReportService:
                 scope_exchange=payload.scope_exchange,
                 language=payload.options.language,
                 summary_schema_version=self.settings.summary_schema_version,
-                provider=ProviderMetadata(name=provider_name, model=llm_result.model, status=llm_result.status, latency_ms=llm_result.latency_ms),
+                analysis_status=analysis_status,
+                history_status=history_status,
+                source_status=source_status,
+                report_status=report_status,
+                provider=ProviderMetadata.model_validate(provider_metadata),
                 data_sources=user_data_sources,
                 summary=summary,
                 markdown_report=markdown_report,
@@ -301,14 +429,181 @@ class ReportService:
                 warnings=warnings,
             )
         )
-        return report.model_dump()
+        response = report.model_dump()
+        if self.settings.enable_ai_report_history and current_user is not None:
+            try:
+                history_id = await self.history_service.save_report_after_analysis(
+                    current_user=current_user,
+                    payload=payload,
+                    report_response=response,
+                    matched_watchlist_item=matched_watchlist_item,
+                )
+            except AiReportHistoryUnavailableError as exc:
+                if self.settings.ai_report_history_save_failure_policy == "strict":
+                    return api_error(
+                        "Báo cáo đã phân tích xong nhưng không lưu được lịch sử.",
+                        "HISTORY_SAVE_FAILED",
+                        code=503,
+                        details=[{"field": "history", "message": self._safe_error_detail(exc)}],
+                    )
+                data = response.get("data") if isinstance(response.get("data"), dict) else {}
+                warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
+                message = "Báo cáo đã phân tích thành công nhưng chưa lưu được lịch sử."
+                if message not in warnings:
+                    warnings.append(message)
+                data["warnings"] = warnings
+                data["history_status"] = "failed"
+                data["report_status"] = self._derive_report_status(
+                    analysis_status=str(data.get("analysis_status") or "success"),
+                    history_status="failed",
+                    source_status=str(data.get("source_status") or source_status),
+                    warnings=warnings,
+                    has_report_content=bool(data.get("summary")),
+                )
+                response["data"] = data
+            else:
+                data = response.get("data") if isinstance(response.get("data"), dict) else {}
+                data["history_status"] = "success" if history_id else "failed"
+                data["report_status"] = self._derive_report_status(
+                    analysis_status=str(data.get("analysis_status") or "success"),
+                    history_status=str(data.get("history_status") or "success"),
+                    source_status=str(data.get("source_status") or source_status),
+                    warnings=data.get("warnings") if isinstance(data.get("warnings"), list) else [],
+                    has_report_content=bool(data.get("summary")),
+                )
+                response["data"] = data
+        else:
+            data = response.get("data") if isinstance(response.get("data"), dict) else {}
+            data["history_status"] = "disabled"
+            data["report_status"] = self._derive_report_status(
+                analysis_status=str(data.get("analysis_status") or "success"),
+                history_status="disabled",
+                source_status=str(data.get("source_status") or source_status),
+                warnings=data.get("warnings") if isinstance(data.get("warnings"), list) else [],
+                has_report_content=bool(data.get("summary")),
+            )
+            response["data"] = data
+        summary = response.get("data", {}).get("summary") if isinstance(response.get("data"), dict) else summary
+        self.summary_service.save_report_presentation_debug_artifacts(symbol, summary if isinstance(summary, dict) else {}, final_response=response)
+        self.missing_field_auditor.save_debug(symbol, response)
+        return response
 
-    def _chart_range_for_time_horizon(self, time_horizon: str) -> str:
-        if time_horizon in {"short", "short_term"}:
-            return "1m"
-        if time_horizon in {"long", "long_term"}:
-            return "1y"
-        return "3m"
+    def _aggregate_source_status(self, sources: list[dict]) -> str:
+        return self.status_service.aggregate_source_status(sources)
+
+    def _derive_report_status(
+        self,
+        *,
+        analysis_status: str,
+        history_status: str,
+        source_status: str,
+        warnings: list[str],
+        has_report_content: bool,
+    ) -> str:
+        return self.status_service.derive_report_status(
+            analysis_status=analysis_status,
+            history_status=history_status,
+            source_status=source_status,
+            warnings=warnings,
+            has_report_content=has_report_content,
+        )
+
+    def _enforce_mandatory_forecast_sections(
+        self,
+        symbol: str,
+        summary: dict,
+        *,
+        research_context: ExternalResearchContext | None,
+    ) -> tuple[dict, dict]:
+        return self.report_assembly_service.enforce_mandatory_forecast_sections(
+            symbol=symbol,
+            summary=summary,
+            research_context=research_context,
+        )
+
+    def _save_numeric_fact_validation_debug(self, symbol: str, result: NumericFactValidationResult) -> None:
+        if not self.report_debug_service.enabled or not result.issues:
+            return
+        try:
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="numeric_fact_validation.json",
+                payload=self.numeric_fact_validation_service.build_debug_payload(symbol=symbol, result=result),
+            )
+        except Exception:
+            return
+
+    def _save_mandatory_forecast_sections_debug(self, symbol: str, payload: dict) -> None:
+        self.report_assembly_service._save_mandatory_forecast_sections_debug(symbol, payload)
+
+    def _scrub_debug_payload(self, value: object) -> object:
+        return scrub_debug_payload(value)
+
+    def _attach_evidence_counts(self, sources: list[dict], summary: dict) -> list[dict]:
+        evidence_rows = summary.get("evidence_table") if isinstance(summary, dict) else []
+        if not isinstance(evidence_rows, list) or not evidence_rows:
+            return sources
+        buckets: dict[str, dict[str, object]] = {}
+        for row in evidence_rows:
+            if not isinstance(row, dict):
+                continue
+            name = self._evidence_source_bucket(row)
+            bucket = buckets.setdefault(name, {"count": 0, "last_crawled_at": None})
+            bucket["count"] = int(bucket["count"] or 0) + 1
+            crawled_at = row.get("crawled_at") or row.get("published_at")
+            if isinstance(crawled_at, str) and crawled_at and (bucket.get("last_crawled_at") is None or crawled_at > str(bucket.get("last_crawled_at"))):
+                bucket["last_crawled_at"] = crawled_at
+
+        result: list[dict] = []
+        seen_names = {str(source.get("name") or "") for source in sources if isinstance(source, dict)}
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            updated = dict(source)
+            bucket = buckets.get(str(updated.get("name") or ""))
+            if bucket:
+                updated["evidence_count"] = bucket.get("count")
+                updated["last_crawled_at"] = bucket.get("last_crawled_at")
+            result.append(updated)
+        for name, bucket in buckets.items():
+            if name in seen_names:
+                continue
+            if name == "Nguồn công bố chính thức":
+                result.append(
+                    {
+                        "name": name,
+                        "type": "official_disclosure",
+                        "category": "Nguồn chính thống",
+                        "status": "success",
+                        "status_label": "Đã ghi nhận",
+                        "summary": "Đã đối chiếu nguồn công bố chính thức phù hợp.",
+                        "detail": "Chỉ dùng làm bằng chứng kiểm chứng, không tạo số liệu mới.",
+                        "source_type": "official_disclosure",
+                        "debug_detail": None,
+                        "evidence_count": bucket.get("count"),
+                        "last_crawled_at": bucket.get("last_crawled_at"),
+                    }
+                )
+        return result
+
+    def _evidence_source_bucket(self, row: dict) -> str:
+        source_type = str(row.get("source_type") or "").strip().lower()
+        source_name = str(row.get("source_name") or "").strip().lower()
+        if source_type == "backend":
+            return "Dữ liệu giá và thanh khoản"
+        if source_type == "company_profile":
+            return "CafeF thông tin doanh nghiệp"
+        if source_type == "peer_data":
+            return "Vietstock peer cùng ngành"
+        if source_type == "official_disclosure":
+            return "Nguồn công bố chính thức"
+        if source_type == "structured_financial":
+            if "cafef" in source_name:
+                return "CafeF tài chính"
+            return "Vietstock Finance BCTC" if "vietstock" in source_name else "Vietstock Finance BCTC"
+        if source_type == "news":
+            return "Tin tức và nghiên cứu bên ngoài"
+        return str(row.get("source_name") or "Tin tức và nghiên cứu bên ngoài")
 
     async def _load_stock_detail_for_analysis(
         self,
@@ -318,78 +613,31 @@ class ReportService:
         *,
         user_token: str,
     ) -> tuple[dict, list[str]]:
-        warnings: list[str] = []
-        source_success = {
-            "analysis_data_loaded": False,
-            "backend_stock_detail_loaded": False,
-            "chart_loaded": False,
+        result = await self.source_collection_coordinator.collect_backend_stock_sources(
+            symbol=symbol,
+            exchange=scope_exchange,
+            token=user_token,
+            chart_range=self.settings.backend_analysis_data_chart_range,
+            quarters=self.settings.backend_analysis_data_quarters,
+            include_peers=self.settings.backend_analysis_data_include_peers,
+            include_market_context=self.settings.backend_analysis_data_include_market_context,
+        )
+        for source in result.data_source_statuses:
+            if isinstance(source, DataSourceStatus):
+                data_sources.append(source)
+            elif isinstance(source, dict):
+                data_sources.append(DataSourceStatus.model_validate(source))
+        stock_detail = result.normalized_stock_payload or result.stock_detail or {
+            "symbol": symbol,
+            "latest_market": {},
+            "financials": {"periods": []},
+            "_source_success": {
+                "analysis_data_loaded": False,
+                "backend_stock_detail_loaded": False,
+                "chart_loaded": False,
+            },
         }
-        if self.settings.backend_use_analysis_data_endpoint and hasattr(self.backend_client, "get_stock_analysis_data"):
-            try:
-                stock_payload = await self.backend_client.get_stock_analysis_data(
-                    symbol=symbol,
-                    token=user_token,
-                    exchange=scope_exchange,
-                    quarters=self.settings.backend_analysis_data_quarters,
-                    chart_range=self.settings.backend_analysis_data_chart_range,
-                    include_peers=self.settings.backend_analysis_data_include_peers,
-                    include_market_context=self.settings.backend_analysis_data_include_market_context,
-                )
-                stock_detail = self.stock_data_service.normalize_analysis_data(stock_payload)
-                source_success["analysis_data_loaded"] = self._has_usable_stock_payload(stock_detail)
-                source_success["chart_loaded"] = bool(stock_detail.get("price_history"))
-                stock_detail["_source_success"] = source_success
-                data_sources.append(
-                    DataSourceStatus(
-                        name="Backend /api/stocks/:symbol/analysis-data",
-                        type="backend_api",
-                        status="success",
-                        detail=(
-                            f"exchange={scope_exchange}; quarters={self.settings.backend_analysis_data_quarters}; "
-                            f"chartRange={self.settings.backend_analysis_data_chart_range}"
-                        ),
-                    )
-                )
-                return stock_detail, warnings
-            except Exception as exc:
-                if self._is_auth_error(exc):
-                    raise
-                warnings = self._merge_string_lists(warnings, [f"Không gọi được analysis-data, đã fallback sang endpoint cũ. Chi tiết: {self._safe_error_detail(exc)}"])
-                data_sources.append(
-                    DataSourceStatus(
-                        name="Backend /api/stocks/:symbol/analysis-data",
-                        type="backend_api",
-                        status="failed",
-                        detail=self._safe_error_detail(exc),
-                    )
-                )
-
-        try:
-            stock_payload = await self.backend_client.get_stock_detail(symbol, token=user_token)
-            stock_detail = self.stock_data_service.normalize_stock_detail(stock_payload)
-            source_success["backend_stock_detail_loaded"] = self._has_usable_stock_payload(stock_detail)
-            data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol", type="backend_api", status="success"))
-        except Exception as exc:
-            if self._is_auth_error(exc):
-                raise
-            stock_detail = {"symbol": symbol, "latest_market": {}, "financials": {"periods": []}, "_source_success": source_success}
-            warnings = self._merge_string_lists(warnings, [f"Chưa gọi được /api/stocks/:symbol: {self._safe_error_detail(exc)}"])
-            data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol", type="backend_api", status="failed", detail=self._safe_error_detail(exc)))
-
-        if hasattr(self.backend_client, "get_stock_chart"):
-            try:
-                chart_range = self.settings.backend_analysis_data_chart_range or "3m"
-                chart_payload = await self.backend_client.get_stock_chart(symbol, range_value=chart_range, token=user_token)
-                stock_detail = self.stock_data_service.merge_chart_history(stock_detail, chart_payload)
-                source_success["chart_loaded"] = bool(self.stock_data_service.normalize_stock_chart(chart_payload))
-                data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol/chart", type="backend_api", status="success", detail=f"range={chart_range}"))
-            except Exception as exc:
-                if self._is_auth_error(exc):
-                    raise
-                warnings = self._merge_string_lists(warnings, [f"Chưa gọi được /api/stocks/:symbol/chart: {self._safe_error_detail(exc)}"])
-                data_sources.append(DataSourceStatus(name="Backend /api/stocks/:symbol/chart", type="backend_api", status="failed", detail=self._safe_error_detail(exc)))
-        stock_detail["_source_success"] = source_success
-        return self.stock_data_service.normalize_analysis_data(stock_detail), warnings
+        return stock_detail, list(result.warnings)
 
     async def _apply_company_fallback(
         self,
@@ -492,7 +740,7 @@ class ReportService:
         return bool(has_company and detail and (sector or group) and has_governance)
 
     def _save_company_overview_debug(self, symbol: str, normalized: dict) -> None:
-        if not (self.settings.external_data_debug_save_extraction_json or self.settings.vietstock_debug_save_extraction_json):
+        if not self.report_debug_service.enabled:
             return
         try:
             payload = {
@@ -506,39 +754,38 @@ class ReportService:
                 ),
                 "company_fallback": normalized.get("_company_fallback") if isinstance(normalized.get("_company_fallback"), dict) else {},
             }
-            debug_dir = Path(self.settings.report_output_dir) / "debug"
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f"{normalize_symbol(symbol)}_company_overview_normalized.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="company_overview_normalized.json",
+                payload=payload,
             )
             merge_debug = normalized.get("_leadership_ownership_merge")
             if not isinstance(merge_debug, dict):
                 overview = normalized.get("company_overview") if isinstance(normalized.get("company_overview"), dict) else {}
                 _, merge_debug = self.stock_data_service.enrich_leadership_with_ownership(overview)
-            (debug_dir / f"{normalize_symbol(symbol)}_leadership_ownership_merge.json").write_text(
-                json.dumps(merge_debug, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="leadership_ownership_merge.json",
+                payload=merge_debug,
             )
         except Exception:
             return
 
     def _save_market_context_debug(self, symbol: str, summary: dict[str, Any]) -> None:
-        if not (self.settings.external_data_debug_save_extraction_json or self.settings.vietstock_debug_save_extraction_json):
+        if not self.report_debug_service.enabled:
             return
         try:
             payload = summary.get("market_context_debug") if isinstance(summary.get("market_context_debug"), dict) else {}
-            debug_dir = Path(self.settings.report_output_dir) / "debug"
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f"{normalize_symbol(symbol)}_market_context_normalized.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="market_context_normalized.json",
+                payload=payload,
             )
         except Exception:
             return
 
     def _save_cafef_financial_attempt_debug(self, symbol: str, payload: dict[str, Any]) -> None:
-        if not (self.settings.external_data_debug_save_extraction_json or self.settings.vietstock_debug_save_extraction_json):
+        if not self.report_debug_service.enabled:
             return
         allowed = {
             "enabled": bool(payload.get("enabled")),
@@ -553,11 +800,10 @@ class ReportService:
         if payload.get("error_type"):
             allowed["error_type"] = str(payload.get("error_type"))
         try:
-            debug_dir = Path(self.settings.report_output_dir) / "debug"
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            (debug_dir / f"{normalize_symbol(symbol)}_cafef_financial_attempt.json").write_text(
-                json.dumps(allowed, ensure_ascii=False, indent=2),
-                encoding="utf-8",
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="cafef_financial_attempt.json",
+                payload=allowed,
             )
         except Exception:
             return
@@ -585,6 +831,88 @@ class ReportService:
                     metrics.add(key)
         return sorted(metrics)
 
+    def _cafef_financial_status(self, payload: dict[str, Any], contribution: dict[str, Any]) -> str:
+        if self._cafef_payload_timed_out(payload):
+            return "failed"
+        raw_status = str(payload.get("status") or contribution.get("raw_status") or "partial").strip().lower()
+        if raw_status in {"disabled", "failed"}:
+            return raw_status
+        status = str(contribution.get("status") or "").strip().lower()
+        if status in {"success", "partial", "insufficient", "failed", "disabled", "skipped"}:
+            return status
+        metrics_count = int(contribution.get("metrics_count") or 0)
+        filled_count = int(contribution.get("filled_fields_count") or 0)
+        if filled_count:
+            return "success"
+        if metrics_count:
+            return "partial"
+        return "insufficient"
+
+    def _cafef_financial_detail(self, contribution: dict[str, Any]) -> str:
+        periods_count = int(contribution.get("periods_count") or 0)
+        metrics_count = int(contribution.get("metrics_count") or 0)
+        filled_count = int(contribution.get("filled_fields_count") or 0)
+        conflicts_count = int(contribution.get("conflicts_count") or 0)
+        if filled_count:
+            return (
+                f"filled_count={filled_count}; usable_count={metrics_count}; "
+                f"periods={periods_count}; conflicts={conflicts_count}"
+            )
+        if metrics_count:
+            return (
+                f"filled_count=0; usable_count={metrics_count}; "
+                f"periods={periods_count}; conflicts={conflicts_count}; used_for=cross_check"
+            )
+        return "filled_count=0; usable_count=0; periods=0"
+
+    def _save_cafef_financial_audit(
+        self,
+        symbol: str,
+        exchange: str,
+        cafef_payload: dict[str, Any] | None,
+        merge_report: dict[str, Any] | None,
+        *,
+        source_status_before: str,
+        source_status_after: str,
+        warnings: list[str] | None = None,
+    ) -> None:
+        if not self.report_debug_service.enabled:
+            return
+        payload = cafef_payload if isinstance(cafef_payload, dict) else {}
+        audit = payload.get("audit") if isinstance(payload.get("audit"), dict) else {}
+        contribution = (
+            merge_report.get("cafef_financial_contribution")
+            if isinstance(merge_report, dict) and isinstance(merge_report.get("cafef_financial_contribution"), dict)
+            else {}
+        )
+        merge_contributions = contribution.get("merge_contributions") if isinstance(contribution.get("merge_contributions"), list) else []
+        result = {
+            "symbol": normalize_symbol(symbol),
+            "exchange": exchange,
+            "url": payload.get("source_url") or audit.get("url") or "",
+            "attempted": True,
+            "page_loaded": bool(audit.get("page_loaded")),
+            "tables_found": int(audit.get("tables_found") or 0),
+            "raw_period_headers": audit.get("raw_period_headers") or [],
+            "raw_metric_rows_count": int(audit.get("raw_metric_rows_count") or 0),
+            "normalized_periods_count": int(audit.get("normalized_periods_count") or len(payload.get("periods") or [])),
+            "normalized_metrics_count": int(audit.get("normalized_metrics_count") or contribution.get("metrics_count") or 0),
+            "mapped_metrics": audit.get("mapped_metrics") or payload.get("mapped_metrics") or [],
+            "unmapped_metrics": audit.get("unmapped_metrics") or payload.get("unmapped_metrics") or [],
+            "merge_contributions": merge_contributions,
+            "source_status_before": source_status_before,
+            "source_status_after": source_status_after,
+            "warnings": self._merge_string_lists(warnings or [], self._string_list(payload.get("technical_warnings"))),
+        }
+        try:
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="cafef_financial_audit.json",
+                payload=result,
+            )
+        except Exception:
+            return
+
     async def _apply_financial_fallback(
         self,
         symbol: str,
@@ -598,6 +926,9 @@ class ReportService:
         has_primary_financials = bool(self.stock_data_service.valid_financial_periods(periods))
 
         warnings: list[str] = []
+        source_payloads: list[dict[str, Any]] = []
+        cafef_payload: dict[str, Any] | None = None
+        cafef_status_before = "skipped"
 
         if self.settings.effective_enable_vietstock_financial_fallback and not has_primary_financials:
             try:
@@ -618,11 +949,9 @@ class ReportService:
                     status = raw_status if raw_status in {"success", "partial", "insufficient", "disabled", "failed"} else "success"
                 else:
                     status = "insufficient" if raw_status not in {"failed", "disabled"} else raw_status
-                source_url = fallback_payload.get("source_url") or "Vietstock Finance"
                 periods_count = len(valid_periods)
-                detail = f"{source_url}; periods={periods_count}"
-                if valid_periods:
-                    normalized = self.stock_data_service.merge_financial_fallback(normalized, fallback_payload)
+                detail = f"periods={periods_count}; metrics={len(self._financial_metrics_found(valid_periods))}"
+                source_payloads.append(fallback_payload)
                 data_sources.append(DataSourceStatus(name="Vietstock Finance BCTC", type="external_financial", status=status, detail=detail))
                 warnings = self._merge_string_lists(warnings, fallback_warnings)
                 if valid_periods:
@@ -654,35 +983,36 @@ class ReportService:
                 detail = self._safe_error_detail(exc)
                 cafef_attempt.update({"status": "failed", "error_type": exc.__class__.__name__})
                 self._save_cafef_financial_attempt_debug(symbol, cafef_attempt)
+                self._save_cafef_financial_audit(
+                    symbol,
+                    scope_exchange,
+                    None,
+                    None,
+                    source_status_before="failed",
+                    source_status_after="failed",
+                    warnings=[detail],
+                )
                 data_sources.append(DataSourceStatus(name="CafeF tài chính", type="external_financial", status="failed", detail=detail))
                 warnings.append(f"Không lấy được dữ liệu tài chính CafeF: {detail}")
             else:
                 cafef_periods = cafef_payload.get("periods") if isinstance(cafef_payload, dict) else []
                 valid_cafef_periods = self.stock_data_service.valid_financial_periods(cafef_periods if isinstance(cafef_periods, list) else [])
                 raw_status = cafef_payload.get("status") or "partial"
+                cafef_status_before = str(raw_status)
                 cafef_warnings = self._merge_string_lists(
                     self._string_list((cafef_payload or {}).get("warnings")),
                     self._string_list((cafef_payload or {}).get("technical_warnings")),
                 )
-                if self._cafef_payload_timed_out(cafef_payload):
-                    status = "failed"
-                elif valid_cafef_periods:
-                    status = raw_status if raw_status in {"success", "partial", "insufficient", "disabled", "failed"} else "success"
-                else:
-                    status = "insufficient" if raw_status not in {"failed", "disabled"} else raw_status
-                detail = f"{cafef_payload.get('source_url') or 'CafeF'}; periods={len(valid_cafef_periods)}; attempted=true"
-                if valid_cafef_periods:
-                    normalized = self.stock_data_service.merge_financial_fallback(normalized, cafef_payload)
                 cafef_attempt.update(
                     {
                         "url": cafef_payload.get("source_url") or "",
-                        "status": status,
+                        "status": raw_status,
                         "periods_found": len(valid_cafef_periods),
                         "metrics_found": self._financial_metrics_found(valid_cafef_periods),
                     }
                 )
                 self._save_cafef_financial_attempt_debug(symbol, cafef_attempt)
-                data_sources.append(DataSourceStatus(name="CafeF tài chính", type="external_financial", status=status, detail=detail))
+                source_payloads.append(cafef_payload)
                 warnings = self._merge_string_lists(warnings, cafef_warnings)
         else:
             data_sources.append(
@@ -706,6 +1036,49 @@ class ReportService:
                     "fallback_used": has_primary_financials,
                 },
             )
+
+        merge_report: dict[str, Any] | None = None
+        if source_payloads or self.settings.enable_financial_source_merge:
+            normalized, merge_report = self.financial_merge_service.merge(
+                normalized,
+                source_payloads,
+                symbol=symbol,
+                exchange=scope_exchange,
+            )
+
+        if cafef_payload is not None:
+            cafef_contribution = (
+                (merge_report or {}).get("cafef_financial_contribution")
+                if isinstance((merge_report or {}).get("cafef_financial_contribution"), dict)
+                else {}
+            )
+            status = self._cafef_financial_status(cafef_payload, cafef_contribution)
+            detail = self._cafef_financial_detail(cafef_contribution)
+            data_sources.append(
+                DataSourceStatus(
+                    name="CafeF tài chính",
+                    type="external_financial",
+                    status=status,
+                    detail=detail,
+                    evidence_count=int(cafef_contribution.get("metrics_count") or 0) or None,
+                )
+            )
+            self._save_cafef_financial_audit(
+                symbol,
+                scope_exchange,
+                cafef_payload,
+                merge_report,
+                source_status_before=cafef_status_before,
+                source_status_after=status,
+                warnings=self._string_list(cafef_payload.get("warnings")),
+            )
+
+            filled_count = int(cafef_contribution.get("filled_fields_count") or 0)
+            if filled_count:
+                warnings = self._merge_string_lists(
+                    warnings,
+                    [f"CafeF tài chính đã bù {filled_count} chỉ tiêu/kỳ tài chính còn thiếu."],
+                )
         return normalized, warnings
 
     async def _apply_peer_fallback(
@@ -1036,40 +1409,30 @@ class ReportService:
         peer["enrichment_sources"] = sources
 
     def _save_peer_enrichment_debug(self, symbol: str, fallback_payload: dict, normalized: dict) -> None:
-        if not (self.settings.external_data_debug_save_extraction_json or self.settings.vietstock_debug_save_extraction_json):
+        if not self.report_debug_service.enabled:
             return
         try:
-            debug_dir = Path(self.settings.report_output_dir) / "debug"
-            debug_dir.mkdir(parents=True, exist_ok=True)
             peers = fallback_payload.get("peers") if isinstance(fallback_payload.get("peers"), list) else []
             recommendation = normalized.get("same_industry_recommendation") if isinstance(normalized.get("same_industry_recommendation"), dict) else {}
             candidates = recommendation.get("candidates") if isinstance(recommendation.get("candidates"), list) else []
-            (debug_dir / f"{normalize_symbol(symbol)}_peer_enrichment.json").write_text(
-                json.dumps(
-                    {
-                        "symbol": normalize_symbol(symbol),
-                        "enabled": self.settings.enable_peer_web_enrichment,
-                        "source_url": fallback_payload.get("source_url"),
-                        "enrichment_attempts": (fallback_payload.get("peer_enrichment") or {}).get("attempts") or [],
-                        "peers": peers,
-                        "missing_metrics_per_peer": {
-                            peer.get("symbol"): peer.get("missing_metrics") for peer in peers if isinstance(peer, dict)
-                        },
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="peer_enrichment.json",
+                payload={
+                    "symbol": normalize_symbol(symbol),
+                    "enabled": self.settings.enable_peer_web_enrichment,
+                    "source_url": fallback_payload.get("source_url"),
+                    "enrichment_attempts": (fallback_payload.get("peer_enrichment") or {}).get("attempts") or [],
+                    "peers": peers,
+                    "missing_metrics_per_peer": {
+                        peer.get("symbol"): peer.get("missing_metrics") for peer in peers if isinstance(peer, dict)
                     },
-                    ensure_ascii=False,
-                    indent=2,
-                    default=str,
-                ),
-                encoding="utf-8",
+                },
             )
-            (debug_dir / f"{normalize_symbol(symbol)}_same_industry_candidates.json").write_text(
-                json.dumps(
-                    {"symbol": normalize_symbol(symbol), "final_candidates": candidates},
-                    ensure_ascii=False,
-                    indent=2,
-                    default=str,
-                ),
-                encoding="utf-8",
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="same_industry_candidates.json",
+                payload={"symbol": normalize_symbol(symbol), "final_candidates": candidates},
             )
         except Exception:
             return
@@ -1085,18 +1448,6 @@ class ReportService:
         detail = self._safe_error_detail(exc).lower()
         return status_code == 401 or category == "unauthorized" or "401" in detail or "unauthorized" in detail
 
-    def _has_usable_stock_payload(self, payload: dict) -> bool:
-        if not isinstance(payload, dict):
-            return False
-        normalized = self.stock_data_service.normalize_analysis_data(payload)
-        return bool(
-            normalized.get("symbol")
-            or normalized.get("company")
-            or normalized.get("latest_market")
-            or normalized.get("price_history")
-            or (normalized.get("financials") or {}).get("periods")
-        )
-
     def _mark_watchlist_loaded(self, stock_detail: dict) -> None:
         if not isinstance(stock_detail, dict):
             return
@@ -1107,21 +1458,20 @@ class ReportService:
         stock_detail["_source_success"] = source_success
 
     def _safe_error_detail(self, exc: Exception) -> str:
-        detail = str(exc)
+        detail = scrub_debug_text(str(exc))
         if len(detail) > 300:
             detail = detail[:297] + "..."
         return detail
 
     async def _save_backend_debug_artifacts(self, symbol: str, *, user_token: str | None = None) -> None:
-        if not (self.settings.external_data_debug_save_extraction_json or self.settings.vietstock_debug_save_extraction_json):
+        if not self.report_debug_service.enabled:
             return
         try:
-            debug_dir = Path(self.settings.report_output_dir) / "debug"
-            debug_dir.mkdir(parents=True, exist_ok=True)
             config_payload = await ConfigDiagnosticService(self.settings, self.backend_client).build(check_backend=False)
-            (debug_dir / f"{symbol}_config_check.json").write_text(
-                json.dumps(config_payload, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="config_check.json",
+                payload=config_payload,
             )
             backend_payload = {
                 "base_url": self.backend_client.base_url,
@@ -1136,28 +1486,28 @@ class ReportService:
                 ),
                 "calls": self.backend_client.sanitized_diagnostics(),
             }
-            (debug_dir / f"{symbol}_backend_urls.json").write_text(
-                json.dumps(backend_payload, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="backend_urls.json",
+                payload=backend_payload,
             )
         except Exception:
             return
 
     def _save_data_sources_debug(self, symbol: str, raw_sources: list[DataSourceStatus], user_sources: list[dict]) -> None:
-        if not (self.settings.external_data_debug_save_extraction_json or self.settings.vietstock_debug_save_extraction_json):
+        if not self.report_debug_service.enabled:
             return
         try:
-            debug_dir = Path(self.settings.report_output_dir) / "debug"
-            debug_dir.mkdir(parents=True, exist_ok=True)
             raw_payload = [source.model_dump() if hasattr(source, "model_dump") else source for source in raw_sources]
             payload = {
                 "symbol": normalize_symbol(symbol),
                 "user_facing_sources": user_sources,
                 "source_mapping": build_data_source_debug_rows(raw_payload, user_sources),
             }
-            (debug_dir / f"{normalize_symbol(symbol)}_user_facing_sources_debug.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-                encoding="utf-8",
+            self.report_debug_service.write_symbol_json_artifact(
+                symbol=symbol,
+                suffix="user_facing_sources_debug.json",
+                payload=payload,
             )
         except Exception:
             return
@@ -1209,6 +1559,29 @@ class ReportService:
             bctc_3q["data_quality_notes"] = self._merge_string_lists(bctc_3q.get("data_quality_notes"), notes)
             merged["bctc_3q"] = bctc_3q
 
+        action_plan = self._first_llm_field(source, "action_plan", "actionPlan", "monitoring_plan", "monitoringPlan")
+        if action_plan not in (None, "", {}, []):
+            merged["action_plan"] = action_plan
+
+        scenarios = self._first_llm_field(source, "scenarios", "scenario_matrix", "scenarioMatrix")
+        if scenarios not in (None, "", {}, []):
+            merged["llm_scenarios"] = scenarios
+            if self._scenario_rows_have_forecast_contract(scenarios) or not merged.get("forecast_scenarios"):
+                merged["scenarios"] = scenarios
+            else:
+                merged["scenarios"] = merged.get("forecast_scenarios")
+
+        checklist = self._first_llm_field(source, "checklist", "watch_points", "watchPoints", "risk_management", "riskManagement")
+        if checklist not in (None, "", {}, []):
+            merged["checklist"] = checklist
+
+        for key in ("executive_forecast", "quantitative_signal_summary", "risk_map", "evidence_table"):
+            value = self._first_llm_field(source, key)
+            if value not in (None, "", {}, []):
+                merged[f"llm_{key}"] = value
+                if key not in merged or merged.get(key) in (None, "", {}, []):
+                    merged[key] = value
+
         markdown_report = llm_data.get("markdown_report") or source.get("markdown_report")
         markdown_content = None
         if isinstance(markdown_report, dict):
@@ -1217,6 +1590,35 @@ class ReportService:
                 markdown_content = content.strip()
 
         return merged, markdown_content
+
+    def _scenario_rows_have_forecast_contract(self, value: object) -> bool:
+        rows: list[object]
+        if isinstance(value, dict) and isinstance(value.get("rows"), list):
+            rows = value["rows"]
+        elif isinstance(value, dict):
+            rows = [item for item in value.values() if item not in (None, "", {}, [])]
+        elif isinstance(value, list):
+            rows = value
+        else:
+            return False
+        if not rows:
+            return False
+        valid = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("probability_pct") is not None and (row.get("invalidation_signals") or row.get("invalidationSignals")):
+                valid += 1
+        return valid >= min(3, len(rows))
+
+    def _first_llm_field(self, source: dict, *keys: str) -> object | None:
+        if not isinstance(source, dict):
+            return None
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, "", {}, []):
+                return value
+        return None
 
     def _string_list(self, value: object) -> list[str]:
         if isinstance(value, list):

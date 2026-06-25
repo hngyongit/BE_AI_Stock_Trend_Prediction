@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from analyse.config.settings import Settings
 from analyse.research.vietstock_financial_adapter import (
@@ -6,6 +7,7 @@ from analyse.research.vietstock_financial_adapter import (
     VietstockFinancialAdapter,
 )
 from analyse.services.stock_data_service import StockDataService
+from analyse.utils.playwright_safe import TargetClosedError
 
 
 VIETSTOCK_TABLE_HTML = """
@@ -434,6 +436,207 @@ def test_playwright_renderer_handles_missing_dependency_gracefully(monkeypatch, 
 
     assert html is None
     assert any("Playwright chưa được cài đặt" in warning for warning in warnings)
+
+
+def test_playwright_renderer_cleanup_removes_listener_and_closes_objects(monkeypatch, tmp_path):
+    close_order = []
+
+    class FakeLocator:
+        def first(self):
+            return self
+
+        async def count(self):
+            return 0
+
+        async def is_visible(self, timeout):
+            return False
+
+        async def click(self, timeout):
+            raise AssertionError("click should not be reached")
+
+    class FakePage:
+        def __init__(self):
+            self.handler = None
+            self.removed = None
+            self.goto_calls = []
+
+        def on(self, event, handler):
+            self.handler = handler
+            self.event = event
+
+        def remove_listener(self, event, handler):
+            self.removed = (event, handler)
+
+        async def goto(self, url, *, wait_until, timeout):
+            self.goto_calls.append({"url": url, "wait_until": wait_until, "timeout": timeout})
+
+        def locator(self, selector):
+            return FakeLocator()
+
+        async def wait_for_selector(self, selector, *, timeout):
+            return None
+
+        async def wait_for_timeout(self, timeout):
+            return None
+
+        async def content(self):
+            return VIETSTOCK_TABLE_HTML
+
+        async def close(self):
+            close_order.append("page")
+
+    fake_page = FakePage()
+
+    class FakeContext:
+        async def new_page(self):
+            return fake_page
+
+        async def close(self):
+            close_order.append("context")
+
+    fake_context = FakeContext()
+
+    class FakeBrowser:
+        async def new_context(self, **kwargs):
+            return fake_context
+
+        async def close(self):
+            close_order.append("browser")
+
+    fake_browser = FakeBrowser()
+
+    class FakeChromium:
+        async def launch(self, **kwargs):
+            return fake_browser
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakePlaywrightContext:
+        async def __aenter__(self):
+            return FakePlaywright()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePlaywrightModule:
+        @staticmethod
+        def async_playwright():
+            return FakePlaywrightContext()
+
+    def fake_import(name):
+        if name == "playwright.async_api":
+            return FakePlaywrightModule
+        raise AssertionError(name)
+
+    monkeypatch.setattr("analyse.research.vietstock_financial_adapter.importlib.import_module", fake_import)
+    settings = _settings(
+        tmp_path,
+        VIETSTOCK_BCTC_TIMEOUT_MS=77000,
+        VIETSTOCK_BCTC_BROWSER_WAIT_UNTIL="load",
+        VIETSTOCK_BCTC_BROWSER_EXTRA_WAIT_MS=0,
+    )
+    renderer = PlaywrightVietstockRenderer(settings)
+
+    html, warnings = asyncio.run(
+        renderer._fetch_rendered_html_direct("https://finance.vietstock.vn/HPG/tai-chinh.htm?tab=BCTT")
+    )
+
+    assert html is not None
+    assert any("wait_until=load" in warning for warning in warnings)
+    assert fake_page.goto_calls == [
+        {
+            "url": "https://finance.vietstock.vn/HPG/tai-chinh.htm?tab=BCTT",
+            "wait_until": "load",
+            "timeout": 77000,
+        }
+    ]
+    assert fake_page.removed == ("response", fake_page.handler)
+    assert close_order == ["page", "context", "browser"]
+
+
+def test_playwright_renderer_target_closed_writes_scrubbed_debug_artifact(monkeypatch, tmp_path):
+    class FakePage:
+        def on(self, event, handler):
+            self.handler = handler
+
+        def remove_listener(self, event, handler):
+            self.removed = (event, handler)
+
+        async def goto(self, url, *, wait_until, timeout):
+            raise TargetClosedError("Target page closed Authorization: Bearer raw-secret api_key=raw-key")
+
+        async def content(self):
+            raise TargetClosedError("Target page, context or browser has been closed")
+
+        async def close(self):
+            raise TargetClosedError("already closed")
+
+    fake_page = FakePage()
+
+    class FakeContext:
+        async def new_page(self):
+            return fake_page
+
+        async def close(self):
+            raise TargetClosedError("already closed")
+
+    class FakeBrowser:
+        async def new_context(self, **kwargs):
+            return FakeContext()
+
+        async def close(self):
+            raise TargetClosedError("already closed")
+
+    class FakeChromium:
+        async def launch(self, **kwargs):
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakePlaywrightContext:
+        async def __aenter__(self):
+            return FakePlaywright()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePlaywrightModule:
+        @staticmethod
+        def async_playwright():
+            return FakePlaywrightContext()
+
+    def fake_import(name):
+        if name == "playwright.async_api":
+            return FakePlaywrightModule
+        raise AssertionError(name)
+
+    monkeypatch.setattr("analyse.research.vietstock_financial_adapter.importlib.import_module", fake_import)
+    settings = _settings(
+        tmp_path,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+        VIETSTOCK_DEBUG_SAVE_EXTRACTION_JSON=True,
+    )
+    renderer = PlaywrightVietstockRenderer(settings)
+
+    html, warnings = asyncio.run(
+        renderer._fetch_rendered_html_direct(
+            "https://finance.vietstock.vn/HPG/tai-chinh.htm?tab=BCTT&token=raw-token"
+        )
+    )
+
+    payload_path = tmp_path / "reports" / "debug" / "HPG_vietstock_bctc_playwright_error.json"
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert html is None
+    assert any("TargetClosedError" in warning for warning in warnings)
+    assert payload["source"] == "Vietstock BCTC"
+    assert payload["error_type"] == "TargetClosedError"
+    assert payload["cleanup_completed"] is True
+    assert "raw-token" not in serialized
+    assert "raw-secret" not in serialized
+    assert "raw-key" not in serialized
 
 
 def test_browser_fallback_handles_timeout_without_crashing(tmp_path):

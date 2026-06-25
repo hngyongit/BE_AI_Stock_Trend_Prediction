@@ -174,8 +174,10 @@ def test_research_service_builds_adapters_when_env_enabled(tmp_path):
     service = ExternalResearchService(_settings(tmp_path))
     adapters = service._build_adapters()
 
-    assert len(adapters) == 3
-    assert {adapter.source_name for adapter in adapters} == {"Vietstock", "CafeF", "Google News RSS"}
+    names = {adapter.source_name for adapter in adapters}
+    assert len(adapters) > 3
+    assert {"Vietstock", "CafeF", "Google News RSS"}.issubset(names)
+    assert {"Tin nhanh chứng khoán", "VnEconomy", "BNews"}.issubset(names)
 
 
 def test_research_service_returns_clear_warning_when_no_adapter_enabled(tmp_path):
