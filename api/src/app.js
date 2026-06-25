@@ -15,6 +15,10 @@ const { dashboardRouter } = require('./modules/dashboard/dashboard.routes');
 const subscriptionsRouter = require('./modules/subscriptions/subscriptions.routes');
 const adminSubscriptionsRouter = require('./modules/admin-subscriptions/admin-subscriptions.routes');
 const staffSubscriptionsRouter = require('./modules/staff-subscriptions/staff-subscriptions.routes');
+const dataSourcesRouter = require('./modules/data-sources/data-sources.routes');
+const crawlJobsRouter = require('./modules/crawl-jobs/crawl-jobs.routes');
+const crawlLogsRouter = require('./modules/crawl-logs/crawl-logs.routes');
+const dataQualityRouter = require('./modules/data-quality/data-quality.routes');
 const { error } = require('./common/utils/response.util');
 
 const swaggerUi = require('swagger-ui-express');
@@ -83,6 +87,10 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/subscriptions', subscriptionsRouter);
 app.use('/api/admin/subscriptions', adminSubscriptionsRouter);
 app.use('/api/staff/subscriptions', staffSubscriptionsRouter);
+app.use('/api/staff/data-sources', dataSourcesRouter);
+app.use('/api/staff/crawl-jobs', crawlJobsRouter);
+app.use('/api/staff/crawl-logs', crawlLogsRouter);
+app.use('/api/staff/data-quality', dataQualityRouter);
 
 // Health check endpoint
 app.get('/', (req, res) => {

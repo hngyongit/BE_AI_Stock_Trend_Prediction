@@ -7,7 +7,10 @@ const CrawlJob = require('../../database/models/crawl-job.model');
 const CrawlLog = require('../../database/models/crawl-log.model');
 const DimStock = require('../../database/models/dim-stock.model');
 const DimMarket = require('../../database/models/dim-market.model');
+const FactCrawlQuality = require('../../database/models/fact-crawl-quality.model');
+const CrawlLogDetail = require('../../database/models/crawl-log-detail.model');
 const DimStockDataSource = require('../../database/models/dim-stock-data-source.model');
+const mongoose = require('mongoose');
 
 /**
  * Fetch watchlist items for a specific user, including the latest price metrics.
@@ -150,6 +153,52 @@ const findCrawlStats = async () => {
     DimStockDataSource.countDocuments()
   ]);
 
+  // ETL status: latest run status per data_type
+  const latestCrawlLogs = await CrawlLog.aggregate([
+    { $sort: { started_at: -1 } },
+    {
+      $lookup: {
+        from: 'crawlJobs',
+        localField: 'crawl_job_id',
+        foreignField: '_id',
+        as: 'job'
+      }
+    },
+    { $unwind: { path: '$job', preserveNullAndEmptyArrays: true } },
+    { $match: { 'job.data_type': { $ne: null } } },
+    {
+      $group: {
+        _id: '$job.data_type',
+        latest_status: { $first: '$status' },
+        latest_run: { $first: '$started_at' },
+        log_id: { $first: '$_id' }
+      }
+    }
+  ]);
+
+  // Data quality summary from FactCrawlQuality
+  const qualityAgg = await FactCrawlQuality.aggregate([
+    {
+      $group: {
+        _id: null,
+        avg_success_rate: { $avg: '$success_rate' },
+        total_failed: { $sum: '$records_failed' }
+      }
+    }
+  ]);
+
+  const totalFailedSymbols = await CrawlLogDetail.countDocuments({ status: 'FAILED' });
+
+  const qualitySummary = qualityAgg[0] || { avg_success_rate: 0, total_failed: 0 };
+
+  // Database status: collection counts
+  const collectionNames = await mongoose.connection.db.listCollections().toArray();
+  const collectionCounts = {};
+  for (const col of collectionNames) {
+    const count = await mongoose.connection.db.collection(col.name).countDocuments();
+    collectionCounts[col.name] = count;
+  }
+
   return {
     jobs: {
       total: totalJobs,
@@ -178,7 +227,21 @@ const findCrawlStats = async () => {
       status: log.status,
       records_processed: (log.records_inserted || 0) + (log.records_updated || 0),
       error_message: log.error_message || null
-    }))
+    })),
+    etl_status: latestCrawlLogs.map(e => ({
+      data_type: e._id,
+      latest_status: e.latest_status,
+      latest_run: e.latest_run
+    })),
+    data_quality: {
+      avg_success_rate_percent: Number((qualitySummary.avg_success_rate || 0).toFixed(2)),
+      total_records_failed: qualitySummary.total_failed || 0,
+      total_failed_symbols: totalFailedSymbols
+    },
+    database_status: {
+      collections: Object.keys(collectionCounts).length,
+      total_documents: Object.values(collectionCounts).reduce((sum, c) => sum + c, 0)
+    }
   };
 };
 

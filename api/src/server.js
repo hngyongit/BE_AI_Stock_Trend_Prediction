@@ -3,6 +3,7 @@ const appConfig = require('./config/app.config');
 const env = require('./config/env.config');
 const connectDB = require('./config/database.config');
 const seedRolesAndUsers = require('./database/seeds/seed-roles');
+const seedDataSources = require('./database/seeds/seed-data-sources');
 
 const startServer = async () => {
   try {
@@ -12,6 +13,10 @@ const startServer = async () => {
     // 2. Auto-run Role/User Seeding on Startup
     console.log('[Server] Verifying default roles and user accounts...');
     await seedRolesAndUsers();
+
+    // 3. Auto-run Data Sources Seeding
+    console.log('[Server] Verifying default data sources...');
+    await seedDataSources();
 
     // 3. Start Listening
     const server = app.listen(appConfig.port, () => {
