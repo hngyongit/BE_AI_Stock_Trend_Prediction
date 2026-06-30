@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from analyse.schemas.common import ProviderName, SourceStatus
 from analyse.schemas.stock import AnalysisOptions
@@ -12,7 +12,7 @@ class AnalyseOneReportRequest(BaseModel):
     provider: ProviderName | None = None
     model: str | None = None
     symbol: str
-    scope_exchange: str = Field(default="HOSE", alias="scopeExchange")
+    scope_exchange: str = Field(default="HOSE", validation_alias=AliasChoices("scopeExchange", "exchange", "scope_exchange"), serialization_alias="scopeExchange")
     options: AnalysisOptions = Field(default_factory=AnalysisOptions)
 
     model_config = ConfigDict(populate_by_name=True)

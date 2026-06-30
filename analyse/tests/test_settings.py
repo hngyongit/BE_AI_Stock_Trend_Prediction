@@ -229,6 +229,38 @@ def test_settings_support_backend_analysis_data_and_scoring_variables():
     assert settings.scoring_enable_peer_context is False
 
 
+def test_settings_support_visualization_and_data_formulator_variables():
+    settings = Settings(
+        VISUALIZATION_EXPORT_ENABLED=True,
+        VISUALIZATION_SCHEMA_VERSION="visualization.v1",
+        VISUALIZATION_DEFAULT_CHART_RANGE="1y",
+        VISUALIZATION_MAX_ROWS=5000,
+        VISUALIZATION_DATASET_TTL_SECONDS=1800,
+        VISUALIZATION_CSV_EXPORT_ENABLED=True,
+        DATA_FORMULATOR_ENABLED=False,
+        DATA_FORMULATOR_BASE_URL="http://localhost:5567",
+        DATA_FORMULATOR_PUBLIC_URL="http://localhost:5567",
+        DATA_FORMULATOR_HOME=".data_formulator",
+        DATA_FORMULATOR_PLUGIN_DIR="tools/data-formulator/plugins",
+        DATA_FORMULATOR_SIGNED_URL_SECRET="",
+        DATA_FORMULATOR_ALLOWED_ORIGINS="http://localhost:5567,http://127.0.0.1:5567",
+    )
+
+    assert settings.visualization_export_enabled is True
+    assert settings.visualization_schema_version == "visualization.v1"
+    assert settings.visualization_default_chart_range == "1y"
+    assert settings.visualization_max_rows == 5000
+    assert settings.visualization_dataset_ttl_seconds == 1800
+    assert settings.visualization_csv_export_enabled is True
+    assert settings.data_formulator_enabled is False
+    assert settings.data_formulator_base_url == "http://localhost:5567"
+    assert settings.data_formulator_public_url == "http://localhost:5567"
+    assert settings.data_formulator_home == ".data_formulator"
+    assert settings.data_formulator_plugin_dir == "tools/data-formulator/plugins"
+    assert settings.data_formulator_signed_url_secret == ""
+    assert settings.data_formulator_allowed_origin_list == ["http://localhost:5567", "http://127.0.0.1:5567"]
+
+
 def test_settings_support_vietstock_bctc_aliases_and_peer_fallback():
     settings = Settings(
         ENABLE_CAFEF_COMPANY_FALLBACK=True,

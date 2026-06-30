@@ -51,6 +51,13 @@ def test_analyse_one_request_maps_render_html_alias_true():
     assert request.options.render_html is True
 
 
+def test_analyse_one_request_accepts_exchange_alias_for_manual_curl_payloads():
+    request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "HPG", "exchange": "HNX"})
+
+    assert request.scope_exchange == "HNX"
+    assert request.model_dump(by_alias=True)["scopeExchange"] == "HNX"
+
+
 def test_analyse_one_request_allows_default_provider_from_settings_layer():
     request = AnalyseOneReportRequest.model_validate({"symbol": "FPT", "scopeExchange": "HOSE"})
     assert request.provider is None

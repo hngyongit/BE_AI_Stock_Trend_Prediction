@@ -358,6 +358,77 @@ def test_peer_playwright_renderer_target_closed_writes_scrubbed_debug_artifact(m
     assert "raw-key" not in serialized
 
 
+def test_peer_playwright_renderer_cancelled_error_returns_warning_and_drains(monkeypatch, tmp_path):
+    close_order = []
+
+    class FakePage:
+        def on(self, event, handler):
+            self.handler = handler
+
+        def remove_listener(self, event, handler):
+            self.removed = (event, handler)
+
+        async def goto(self, url, *, wait_until, timeout):
+            raise asyncio.CancelledError()
+
+        async def close(self):
+            close_order.append("page")
+
+    fake_page = FakePage()
+
+    class FakeContext:
+        async def new_page(self):
+            return fake_page
+
+        async def close(self):
+            close_order.append("context")
+
+    class FakeBrowser:
+        async def new_context(self, **kwargs):
+            return FakeContext()
+
+        async def close(self):
+            close_order.append("browser")
+
+    class FakeChromium:
+        async def launch(self, **kwargs):
+            return FakeBrowser()
+
+    class FakePlaywright:
+        chromium = FakeChromium()
+
+    class FakePlaywrightContext:
+        async def __aenter__(self):
+            return FakePlaywright()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class FakePlaywrightModule:
+        @staticmethod
+        def async_playwright():
+            return FakePlaywrightContext()
+
+    def fake_import(name):
+        if name == "playwright.async_api":
+            return FakePlaywrightModule
+        raise AssertionError(name)
+
+    monkeypatch.setattr("analyse.research.vietstock_peer_adapter.importlib.import_module", fake_import)
+    renderer = PlaywrightVietstockPeerRenderer(_settings(tmp_path))
+
+    html, warnings = asyncio.run(
+        renderer._fetch_rendered_html_direct(
+            "https://finance.vietstock.vn/VCB/so-sanh-gia-co-phieu-cung-nganh.htm"
+        )
+    )
+
+    assert html is None
+    assert any("CancelledError" in warning for warning in warnings)
+    assert fake_page.removed == ("response", fake_page.handler)
+    assert close_order == ["page", "context", "browser"]
+
+
 def test_parse_text_lines_remains_available_for_debug(tmp_path):
     adapter = VietstockPeerAdapter(_settings(tmp_path), http_client=FakeHttpClient(""))
 

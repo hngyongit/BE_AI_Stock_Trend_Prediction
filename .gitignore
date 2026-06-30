@@ -25,6 +25,10 @@ pids/
 
 # caches
 .cache/
+.data_formulator/
+analyse/.data_formulator/
+analyse/storage/
+tools/data-formulator/.data_formulator/
 .eslintcache
 .npm/
 .pnpm-store/

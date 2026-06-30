@@ -24,6 +24,14 @@ dependencies = [
     "tzdata",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pyright",
+    "mypy",
+    "vulture",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -31,3 +39,35 @@ where = ["src"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [
+    ".data_formulator",
+    ".research_cache",
+    ".venv",
+    "assets/echarts.min.js",
+    "reports",
+    "storage",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = []
+
+[tool.vulture]
+exclude = [
+    ".data_formulator",
+    ".research_cache",
+    ".venv",
+    "reports",
+    "storage",
+]
+min_confidence = 80
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_configs = true
+exclude = "(.venv|.data_formulator|.research_cache|reports|storage)"

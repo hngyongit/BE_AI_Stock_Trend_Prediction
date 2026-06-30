@@ -288,7 +288,8 @@ def test_api_response_envelope_remains_code_message_data():
 
     payload = api_success("ok", data={"symbol": "FPT"})
 
-    assert set(payload) == {"code", "message", "data"}
+    assert {"code", "message", "data"}.issubset(payload)
+    assert payload["success"] is True
 
 
 def test_source_backed_debug_artifacts_are_scrubbed(tmp_path):

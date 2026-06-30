@@ -4,6 +4,8 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
+import math
 import uuid
 from datetime import datetime
 from decimal import Decimal
@@ -16,11 +18,14 @@ from analyse.repositories.ai_report_history_repository import (
     AiReportHistoryFilters,
     AiReportHistoryRepository,
     AiReportHistoryRepositoryError,
+    create_ai_report_history_repository,
 )
 from analyse.schemas.report import AnalyseOneReportRequest
 from analyse.schemas.report_history import ReportHistoryDetailData, ReportHistoryFilters, ReportHistoryListData, ReportHistoryListItem
 from analyse.services.user_identity_service import CurrentUserIdentity
 from analyse.utils.symbol_utils import normalize_symbol
+
+logger = logging.getLogger(__name__)
 
 
 class AiReportHistoryServiceError(RuntimeError):
@@ -58,7 +63,18 @@ class AiReportHistoryService:
         repository: AiReportHistoryRepository | None = None,
     ) -> None:
         self.settings = settings or get_settings()
-        self.repository = repository or AiReportHistoryRepository(self.settings)
+        self.repository = repository or create_ai_report_history_repository(self.settings)
+        self._repository_injected = repository is not None
+        storage_name = getattr(self.repository, "storage_name", "sqlserver")
+        if storage_name == "file":
+            logger.info("[ai-report-history] storage=file path=%s", getattr(self.repository, "base_dir", ""))
+        else:
+            logger.info("[ai-report-history] storage=sqlserver configured=%s", bool(str(self.settings.ai_report_db_url or "").strip()))
+
+    def is_persistent_history_available(self) -> bool:
+        if getattr(self.repository, "storage_name", "sqlserver") == "file":
+            return True
+        return bool(self.settings.enable_ai_report_history and str(self.settings.ai_report_db_url or "").strip())
 
     async def save_report_after_analysis(
         self,
@@ -68,7 +84,7 @@ class AiReportHistoryService:
         report_response: dict[str, Any],
         matched_watchlist_item: dict[str, Any] | None,
     ) -> str | None:
-        if not self.settings.enable_ai_report_history:
+        if not self.is_persistent_history_available():
             return None
 
         history_id = str(uuid.uuid4())
@@ -104,6 +120,15 @@ class AiReportHistoryService:
 
     async def list_history(self, *, current_user: CurrentUserIdentity, filters: ReportHistoryFilters) -> ReportHistoryListData:
         self._ensure_enabled()
+        logger.info(
+            "[ai-report-history] request page=%s limit=%s filters=symbol:%s exchange:%s provider:%s model:%s",
+            filters.page,
+            filters.limit,
+            filters.symbol,
+            filters.exchange,
+            filters.provider,
+            filters.model,
+        )
         repo_filters = AiReportHistoryFilters(
             symbol=normalize_symbol(filters.symbol) if filters.symbol else None,
             exchange=str(filters.exchange).strip().upper() if filters.exchange else None,
@@ -120,12 +145,16 @@ class AiReportHistoryService:
                 asyncio.to_thread(self.repository.count_by_user, current_user.mongo_user_id, filters=repo_filters),
             )
         except (HistoryStorageNotConfiguredError, AiReportHistoryRepositoryError) as exc:
+            if getattr(self.repository, "storage_name", "sqlserver") == "file":
+                raise AiReportHistoryUnavailableError("Không thể tải lịch sử báo cáo AI.", code="AI_REPORT_HISTORY_STORAGE_ERROR") from exc
             raise AiReportHistoryUnavailableError("Không đọc được lịch sử báo cáo AI.") from exc
+        logger.info("[ai-report-history] loaded total=%s page=%s limit=%s", total, page, limit)
         return ReportHistoryListData(
             items=[self._row_to_list_item(row) for row in rows],
             page=page,
             limit=limit,
             total=total,
+            total_pages=max(1, math.ceil(total / limit)) if limit else 1,
         )
 
     async def get_history_detail(self, *, current_user: CurrentUserIdentity, history_id: str) -> ReportHistoryDetailData:
@@ -133,6 +162,23 @@ class AiReportHistoryService:
         try:
             row = await asyncio.to_thread(self.repository.get_by_id_for_user, history_id, current_user.mongo_user_id)
         except (HistoryStorageNotConfiguredError, AiReportHistoryRepositoryError) as exc:
+            if getattr(self.repository, "storage_name", "sqlserver") == "file":
+                raise AiReportHistoryUnavailableError("Không thể tải chi tiết lịch sử báo cáo AI.", code="AI_REPORT_HISTORY_STORAGE_ERROR") from exc
+            raise AiReportHistoryUnavailableError("Không đọc được chi tiết lịch sử báo cáo AI.") from exc
+        if row is None:
+            raise AiReportHistoryNotFoundError("Không tìm thấy báo cáo trong lịch sử của người dùng hiện tại.")
+        return ReportHistoryDetailData(id=str(row.id), report_id=row.report_id, report_json=self._json_object(row.report_json))
+
+    async def get_history_detail_by_report_id(self, *, current_user: CurrentUserIdentity, report_id: str) -> ReportHistoryDetailData:
+        self._ensure_enabled()
+        clean_report_id = str(report_id or "").strip()
+        if not clean_report_id:
+            raise AiReportHistoryNotFoundError("Không tìm thấy báo cáo trong lịch sử của người dùng hiện tại.")
+        try:
+            row = await asyncio.to_thread(self.repository.get_by_report_id_for_user, clean_report_id, current_user.mongo_user_id)
+        except (HistoryStorageNotConfiguredError, AiReportHistoryRepositoryError) as exc:
+            if getattr(self.repository, "storage_name", "sqlserver") == "file":
+                raise AiReportHistoryUnavailableError("Không thể tải chi tiết lịch sử báo cáo AI.", code="AI_REPORT_HISTORY_STORAGE_ERROR") from exc
             raise AiReportHistoryUnavailableError("Không đọc được chi tiết lịch sử báo cáo AI.") from exc
         if row is None:
             raise AiReportHistoryNotFoundError("Không tìm thấy báo cáo trong lịch sử của người dùng hiện tại.")
@@ -143,12 +189,16 @@ class AiReportHistoryService:
         try:
             deleted = await asyncio.to_thread(self.repository.delete_by_id_for_user, history_id, current_user.mongo_user_id)
         except (HistoryStorageNotConfiguredError, AiReportHistoryRepositoryError) as exc:
+            if getattr(self.repository, "storage_name", "sqlserver") == "file":
+                raise AiReportHistoryUnavailableError("Không thể xóa lịch sử báo cáo AI.", code="AI_REPORT_HISTORY_STORAGE_ERROR") from exc
             raise AiReportHistoryUnavailableError("Không xóa được lịch sử báo cáo AI.") from exc
         if not deleted:
             raise AiReportHistoryNotFoundError("Không tìm thấy báo cáo trong lịch sử của người dùng hiện tại.")
         return True
 
     def _ensure_enabled(self) -> None:
+        if getattr(self.repository, "storage_name", "sqlserver") == "file":
+            return
         if not self.settings.enable_ai_report_history:
             raise AiReportHistoryDisabledError("Tính năng lịch sử báo cáo AI chưa được bật.")
         if not str(self.settings.ai_report_db_url or "").strip():
@@ -230,13 +280,18 @@ class AiReportHistoryService:
             symbol=row.symbol,
             exchange=row.exchange,
             company=row.company,
+            company_name=row.company,
             provider=row.provider,
             model=row.model,
             total_score=self._decimal_to_float(row.total_score),
+            score=self._decimal_to_float(row.total_score),
             risk_score=self._decimal_to_float(row.risk_score),
+            risk_level=row.decision_label,
             data_confidence=self._decimal_to_float(row.data_confidence),
             decision_label=row.decision_label,
+            status=row.decision_label,
             created_at=row.created_at,
+            generated_at=row.created_at,
         )
 
     def _append_save_warning(self, report_response: dict[str, Any]) -> None:
