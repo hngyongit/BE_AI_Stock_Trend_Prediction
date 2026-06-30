@@ -29,8 +29,9 @@ Use these when changing `report_presentation`, renderer input shape, mandatory s
 
 - `tests/test_debug_scrub.py`
 - `tests/test_report_debug_service.py`
+- `tests/test_visualization_dataset_service.py`
 
-Use these when adding debug artifacts, changing scrub logic, changing URL/DB masking, or moving writer boundaries.
+Use these when adding debug artifacts, changing scrub logic, changing URL/DB masking, visualization export payloads, CSV export, or moving writer boundaries.
 
 ## 5. Source/crawler tests
 
@@ -77,6 +78,13 @@ Use these when changing history settings, SQL repository behavior, history endpo
 
 Use these for settings aliases, config diagnostics, Backend client behavior, Windows async helpers, report file writes, report status logic, scoring and service skeleton compatibility.
 
+## 8A. Visualization/Data Formulator tests
+
+- `tests/test_visualization_dataset_service.py`
+- `tests/test_visualization_routes.py`
+
+Use these when changing `visualization.v1`, chart-ready tables, derived indicators, JSON/CSV export routes, feature flags, or Data Formulator sidecar setup.
+
 ## 9. Recommended test commands by change type
 
 API contract:
@@ -119,6 +127,12 @@ Settings/config:
 
 ```powershell
 $env:PYTHONIOENCODING='utf-8'; uv run python -m pytest tests/test_settings.py tests/test_backend_client.py -q
+```
+
+Visualization/Data Formulator:
+
+```powershell
+$env:PYTHONIOENCODING='utf-8'; uv run python -m pytest tests/test_visualization_dataset_service.py tests/test_visualization_routes.py -q
 ```
 
 Before final handoff, always run full compile and full pytest.

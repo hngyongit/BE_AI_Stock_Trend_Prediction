@@ -131,9 +131,9 @@ class PlaywrightVietstockPeerRenderer:
         except asyncio.CancelledError as exc:
             debug_error = exc
             debug_phase = "cancelled"
-            logger.warning("[%s] Request cancelled; cleaning up Playwright", label)
+            logger.warning("[%s] task cancelled; returning partial peer result", label)
             await cancel_pending_tasks_safely(pending_tasks, label=label)
-            raise
+            return None, ["Vietstock peer rendering failed: CancelledError: Playwright task cancelled"]
         except TargetClosedError as exc:  # pragma: no cover - host/browser dependent
             debug_error = exc
             debug_phase = "goto/extract"

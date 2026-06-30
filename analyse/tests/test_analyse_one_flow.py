@@ -5,9 +5,11 @@ from pathlib import Path
 from analyse.config.settings import Settings
 from analyse.schemas.llm import LLMGenerateResult
 from analyse.schemas.report import AnalyseOneReportRequest
+from analyse.schemas.report_history import ReportHistoryFilters
 from analyse.schemas.research import ExternalResearchContext, ResearchItem
-from analyse.services.ai_report_history_service import AiReportHistoryUnavailableError
+from analyse.services.ai_report_history_service import AiReportHistoryService, AiReportHistoryUnavailableError
 from analyse.services.report_service import ReportService
+from analyse.services.user_identity_service import CurrentUserIdentity
 from analyse.services.watchlist_service import WatchlistService
 
 
@@ -560,6 +562,49 @@ def test_analyse_one_saves_history_when_enabled(monkeypatch, tmp_path):
             "stock_id": "stock-fpt",
         }
     ]
+
+
+def test_analyse_one_saves_file_history_when_sql_server_is_missing(monkeypatch, tmp_path):
+    def fake_factory(provider, settings, model=None):
+        return FakeLLMProvider(provider, model or settings.openai_model)
+
+    monkeypatch.setattr("analyse.services.report_service.get_llm_provider", fake_factory)
+    settings = Settings(
+        _env_file=None,
+        ENABLE_AI_REPORT_HISTORY=False,
+        AI_REPORT_HISTORY_STORAGE="file",
+        AI_REPORT_HISTORY_DIR=str(tmp_path / "ai_reports"),
+        ENABLE_EXTERNAL_RESEARCH=False,
+        ENABLE_CAFEF_COMPANY_FALLBACK=False,
+        ENABLE_CAFEF_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_FINANCIAL_FALLBACK=False,
+        ENABLE_VIETSTOCK_PEER_FALLBACK=False,
+        REPORT_OUTPUT_DIR=str(tmp_path / "reports"),
+    )
+    history_service = AiReportHistoryService(settings)
+    backend_client = FakeBackendClient()
+    service = ReportService(
+        settings=settings,
+        backend_client=backend_client,
+        research_service=FakeResearchService(),
+        history_service=history_service,
+    )
+    request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
+
+    result = asyncio.run(service.analyse_one_report(request, user_token="request-token"))
+    listed = asyncio.run(
+        history_service.list_history(
+            current_user=CurrentUserIdentity(mongo_user_id="mongo-user-1", email="user@example.com"),
+            filters=ReportHistoryFilters(page=1, limit=20),
+        )
+    )
+
+    assert result["code"] == 200
+    assert result["data"]["history_id"]
+    assert result["data"]["history_status"] == "success"
+    assert ("current-user", "request-token") in backend_client.tokens
+    assert listed.total == 1
+    assert listed.items[0].report_id == result["data"]["report_id"]
 
 
 def test_analyse_one_history_save_failure_non_blocking_still_returns_success(monkeypatch, tmp_path):

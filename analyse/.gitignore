@@ -5,4 +5,7 @@ __pycache__/
 .pytest_cache/
 src/*.egg-info/
 reports/
+storage/
 .research_cache/
+.visualization_cache/
+.data_formulator/

@@ -140,8 +140,9 @@ class ReportService:
                 details=[{"field": "Authorization", "message": "Authorization header là bắt buộc cho analyse-one."}],
             )
 
+        history_available = self._history_storage_available()
         current_user: CurrentUserIdentity | None = None
-        if self.settings.enable_ai_report_history:
+        if history_available:
             try:
                 current_user = await self.user_identity_service.resolve_current_user(user_token or "")
             except UserIdentityUnauthorizedError:
@@ -395,7 +396,7 @@ class ReportService:
         user_data_sources = self._attach_evidence_counts(user_data_sources, summary)
         self._save_data_sources_debug(symbol, data_sources, user_data_sources)
         source_status = self._aggregate_source_status(user_data_sources)
-        history_status = "pending" if self.settings.enable_ai_report_history else "disabled"
+        history_status = "pending" if history_available else "disabled"
         status_payload = self.status_service.build_report_status(
             has_report_content=bool(summary),
             source_warnings=warnings,
@@ -430,7 +431,7 @@ class ReportService:
             )
         )
         response = report.model_dump()
-        if self.settings.enable_ai_report_history and current_user is not None:
+        if history_available and current_user is not None:
             try:
                 history_id = await self.history_service.save_report_after_analysis(
                     current_user=current_user,
@@ -487,6 +488,15 @@ class ReportService:
         self.summary_service.save_report_presentation_debug_artifacts(symbol, summary if isinstance(summary, dict) else {}, final_response=response)
         self.missing_field_auditor.save_debug(symbol, response)
         return response
+
+    def _history_storage_available(self) -> bool:
+        checker = getattr(self.history_service, "is_persistent_history_available", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except Exception:
+                return bool(self.settings.enable_ai_report_history)
+        return bool(self.settings.enable_ai_report_history)
 
     def _aggregate_source_status(self, sources: list[dict]) -> str:
         return self.status_service.aggregate_source_status(sources)

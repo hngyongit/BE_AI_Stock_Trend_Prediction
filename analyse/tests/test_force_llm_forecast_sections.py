@@ -165,7 +165,8 @@ def test_presentation_contains_mandatory_sections_after_normalization():
 def test_api_response_envelope_remains_code_message_data():
     payload = api_success("ok", data={"summary": {}})
 
-    assert set(payload) == {"code", "message", "data"}
+    assert {"code", "message", "data"}.issubset(payload)
+    assert payload["success"] is True
 
 
 def test_no_personalized_buy_sell_language_in_fallback_sections():

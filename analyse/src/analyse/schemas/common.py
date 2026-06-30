@@ -17,19 +17,27 @@ class ErrorDetail(BaseModel):
 
 class ErrorBody(BaseModel):
     type: str
+    code: str | None = None
     details: list[ErrorDetail] = Field(default_factory=list)
 
 
 class APIErrorResponse(BaseModel):
     code: int
+    success: bool = False
     message: str
     error: ErrorBody
     data: None = None
 
 
 def api_success(message: str, data: Any | None = None, code: int = 200) -> dict[str, Any]:
-    return {"code": code, "message": message, "data": data}
+    return {"code": code, "success": True, "message": message, "data": data}
 
 
 def api_error(message: str, error_type: str, *, code: int = 400, details: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    return {"code": code, "message": message, "error": {"type": error_type, "details": details or []}, "data": None}
+    return {
+        "code": code,
+        "success": False,
+        "message": message,
+        "error": {"type": error_type, "code": error_type, "details": details or []},
+        "data": None,
+    }

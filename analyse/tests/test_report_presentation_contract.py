@@ -136,5 +136,6 @@ def test_final_response_envelope_remains_code_message_data():
     presentation = _service().normalize_and_validate({"scenario_table": {"rows": []}})
     response = api_success("ok", data={"summary": {"report_presentation": presentation}})
 
-    assert set(response.keys()) == {"code", "message", "data"}
+    assert {"code", "message", "data"}.issubset(response)
+    assert response["success"] is True
     assert isinstance(response["data"]["summary"]["report_presentation"], dict)

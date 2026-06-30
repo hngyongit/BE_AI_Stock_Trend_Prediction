@@ -25,13 +25,18 @@ class ReportHistoryListItem(BaseModel):
     symbol: str
     exchange: str
     company: str | None = None
+    company_name: str | None = None
     provider: str
     model: str
     total_score: float | None = None
+    score: float | None = None
     risk_score: float | None = None
+    risk_level: str | None = None
     data_confidence: float | None = None
     decision_label: str | None = None
+    status: str | None = None
     created_at: datetime
+    generated_at: datetime | None = None
 
 
 class ReportHistoryListData(BaseModel):
@@ -39,6 +44,7 @@ class ReportHistoryListData(BaseModel):
     page: int
     limit: int
     total: int
+    total_pages: int = 1
 
 
 class ReportHistoryDetailData(BaseModel):

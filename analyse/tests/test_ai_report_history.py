@@ -170,6 +170,93 @@ def test_history_service_disabled_save_is_noop():
     assert "history_id" not in response["data"]
 
 
+def test_file_history_empty_list_returns_paginated_empty_data(tmp_path):
+    settings = Settings(_env_file=None, AI_REPORT_HISTORY_STORAGE="file", AI_REPORT_HISTORY_DIR=str(tmp_path / "ai_reports"))
+    service = AiReportHistoryService(settings)
+
+    data = asyncio.run(
+        service.list_history(
+            current_user=CurrentUserIdentity(mongo_user_id="mongo-user-1"),
+            filters=ReportHistoryFilters(page=1, limit=20),
+        )
+    )
+
+    assert data.items == []
+    assert data.page == 1
+    assert data.limit == 20
+    assert data.total == 0
+    assert data.total_pages == 1
+
+
+def test_file_history_save_list_filter_and_detail(tmp_path):
+    settings = Settings(_env_file=None, AI_REPORT_HISTORY_STORAGE="file", AI_REPORT_HISTORY_DIR=str(tmp_path / "ai_reports"))
+    service = AiReportHistoryService(settings)
+    user = CurrentUserIdentity(mongo_user_id="mongo-user-1", email="user@example.com")
+    request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": "FPT", "scopeExchange": "HOSE"})
+    response = _sample_report_response()
+
+    history_id = asyncio.run(
+        service.save_report_after_analysis(
+            current_user=user,
+            payload=request,
+            report_response=response,
+            matched_watchlist_item={"watchlist_id": "watch-1", "stock_id": "stock-1"},
+        )
+    )
+    listed = asyncio.run(service.list_history(current_user=user, filters=ReportHistoryFilters(symbol="FPT", exchange="HOSE", page=1, limit=20)))
+    detail = asyncio.run(service.get_history_detail(current_user=user, history_id=history_id or ""))
+
+    assert history_id
+    assert response["data"]["history_id"] == history_id
+    assert listed.total == 1
+    assert listed.total_pages == 1
+    assert listed.items[0].report_id == "FPT_HOSE_20260623_100000"
+    assert listed.items[0].company_name == "Cong ty Co phan FPT"
+    assert listed.items[0].score == 65
+    assert detail.report_json["data"]["report_id"] == "FPT_HOSE_20260623_100000"
+
+
+def test_file_history_pagination_and_filters(tmp_path):
+    settings = Settings(_env_file=None, AI_REPORT_HISTORY_STORAGE="file", AI_REPORT_HISTORY_DIR=str(tmp_path / "ai_reports"))
+    service = AiReportHistoryService(settings)
+    user = CurrentUserIdentity(mongo_user_id="mongo-user-1")
+
+    for idx, symbol in enumerate(["FPT", "HPG", "VCB"]):
+        response = _sample_report_response()
+        response["data"]["report_id"] = f"{symbol}_HOSE_20260623_10000{idx}"
+        response["data"]["symbol"] = symbol
+        response["data"]["generated_at"] = f"2026-06-23T10:00:0{idx}+07:00"
+        request = AnalyseOneReportRequest.model_validate({"provider": "openai", "symbol": symbol, "scopeExchange": "HOSE"})
+        asyncio.run(service.save_report_after_analysis(current_user=user, payload=request, report_response=response, matched_watchlist_item=None))
+
+    page = asyncio.run(service.list_history(current_user=user, filters=ReportHistoryFilters(page=2, limit=2)))
+    filtered = asyncio.run(service.list_history(current_user=user, filters=ReportHistoryFilters(symbol="HPG", page=1, limit=20)))
+
+    assert page.total == 3
+    assert page.total_pages == 2
+    assert len(page.items) == 1
+    assert filtered.total == 1
+    assert filtered.items[0].symbol == "HPG"
+
+
+def test_file_history_malformed_index_raises_storage_error(tmp_path):
+    storage_dir = tmp_path / "ai_reports"
+    storage_dir.mkdir()
+    (storage_dir / "index.json").write_text("{bad json", encoding="utf-8")
+    settings = Settings(_env_file=None, AI_REPORT_HISTORY_STORAGE="file", AI_REPORT_HISTORY_DIR=str(storage_dir))
+    service = AiReportHistoryService(settings)
+
+    with pytest.raises(AiReportHistoryUnavailableError) as exc_info:
+        asyncio.run(
+            service.list_history(
+                current_user=CurrentUserIdentity(mongo_user_id="mongo-user-1"),
+                filters=ReportHistoryFilters(page=1, limit=20),
+            )
+        )
+
+    assert exc_info.value.code == "AI_REPORT_HISTORY_STORAGE_ERROR"
+
+
 def test_history_repository_wraps_unexpected_storage_errors_safely(monkeypatch):
     secret_db_url = "mssql+pyodbc://user:sql-secret@localhost/db"
 
@@ -279,6 +366,39 @@ def test_history_routes_resolve_user_and_delegate_with_user_filter():
     assert detail_response.status_code == 200
     assert delete_response.status_code == 200
     assert fake_history.current_user_ids == ["mongo-user-1", "mongo-user-1", "mongo-user-1"]
+
+
+def test_history_route_file_fallback_returns_200_empty_when_sql_missing(tmp_path):
+    app = create_app()
+    settings = Settings(_env_file=None, AI_REPORT_HISTORY_STORAGE="file", AI_REPORT_HISTORY_DIR=str(tmp_path / "ai_reports"))
+    app.dependency_overrides[get_user_identity_service] = lambda: FakeIdentityDependency()
+    app.dependency_overrides[get_ai_report_history_service] = lambda: AiReportHistoryService(settings)
+    client = TestClient(app)
+
+    response = client.get("/api/ai-reports/history?page=1&limit=20", headers={"Authorization": "Bearer route-token"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["message"] == "Không có báo cáo AI nào trong lịch sử."
+    assert body["data"]["items"] == []
+    assert body["data"]["total"] == 0
+    assert body["data"]["total_pages"] == 1
+
+
+def test_history_route_file_storage_malformed_returns_structured_500(tmp_path):
+    storage_dir = tmp_path / "ai_reports"
+    storage_dir.mkdir()
+    (storage_dir / "index.json").write_text("{bad json", encoding="utf-8")
+    app = create_app()
+    settings = Settings(_env_file=None, AI_REPORT_HISTORY_STORAGE="file", AI_REPORT_HISTORY_DIR=str(storage_dir))
+    app.dependency_overrides[get_user_identity_service] = lambda: FakeIdentityDependency()
+    app.dependency_overrides[get_ai_report_history_service] = lambda: AiReportHistoryService(settings)
+    client = TestClient(app)
+
+    response = client.get("/api/ai-reports/history?page=1&limit=20", headers={"Authorization": "Bearer route-token"})
+
+    assert response.status_code == 500
+    assert response.json()["error"]["type"] == "AI_REPORT_HISTORY_STORAGE_ERROR"
 
 
 def test_history_route_disabled_returns_clean_503():

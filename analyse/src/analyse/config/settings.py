@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     cors_allowed_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", alias="CORS_ALLOWED_ORIGINS")
     cors_allow_credentials: bool = Field(default=True, alias="CORS_ALLOW_CREDENTIALS")
 
+    # LLM model selection
+    default_llm_provider: str = Field(default="openai", alias="DEFAULT_LLM_PROVIDER")
+    allow_request_model_override: bool = Field(default=False, alias="ALLOW_REQUEST_MODEL_OVERRIDE")
+
     backend_api_base_url: str = Field(
         default="http://localhost:5000",
         validation_alias=AliasChoices("BACKEND_API_BASE_URL", "BACKEND_API_URL", "BACKEND_BASE_URL", "API_BASE_URL"),
@@ -48,6 +52,8 @@ class Settings(BaseSettings):
 
     enable_ai_report_history: bool = Field(default=False, alias="ENABLE_AI_REPORT_HISTORY")
     ai_report_db_url: str | None = Field(default=None, alias="AI_REPORT_DB_URL")
+    ai_report_history_storage: str = Field(default="auto", alias="AI_REPORT_HISTORY_STORAGE")
+    ai_report_history_dir: str = Field(default="storage/ai_reports", alias="AI_REPORT_HISTORY_DIR")
     ai_report_history_save_failure_policy: str = Field(default="non_blocking", alias="AI_REPORT_HISTORY_SAVE_FAILURE_POLICY")
 
     report_output_dir: str = Field(default="reports", alias="REPORT_OUTPUT_DIR")
@@ -70,8 +76,22 @@ class Settings(BaseSettings):
     max_watchlist_symbols: int = Field(default=5, alias="MAX_WATCHLIST_SYMBOLS")
     analyse_one_symbol_only: bool = Field(default=True, alias="ANALYSE_ONE_SYMBOL_ONLY")
 
-    default_llm_provider: ProviderName = Field(default="openai", alias="DEFAULT_LLM_PROVIDER")
-    allow_request_model_override: bool = Field(default=True, alias="ALLOW_REQUEST_MODEL_OVERRIDE")
+    visualization_export_enabled: bool = Field(default=True, alias="VISUALIZATION_EXPORT_ENABLED")
+    visualization_schema_version: str = Field(default="visualization.v1", alias="VISUALIZATION_SCHEMA_VERSION")
+    visualization_default_chart_range: str = Field(default="1y", alias="VISUALIZATION_DEFAULT_CHART_RANGE")
+    visualization_max_rows: int = Field(default=5000, alias="VISUALIZATION_MAX_ROWS")
+    visualization_dataset_ttl_seconds: int = Field(default=1800, alias="VISUALIZATION_DATASET_TTL_SECONDS")
+    visualization_csv_export_enabled: bool = Field(default=True, alias="VISUALIZATION_CSV_EXPORT_ENABLED")
+    data_formulator_enabled: bool = Field(default=False, alias="DATA_FORMULATOR_ENABLED")
+    data_formulator_base_url: str = Field(default="http://localhost:5567", alias="DATA_FORMULATOR_BASE_URL")
+    data_formulator_public_url: str = Field(default="http://localhost:5567", alias="DATA_FORMULATOR_PUBLIC_URL")
+    data_formulator_home: str = Field(default=".data_formulator", alias="DATA_FORMULATOR_HOME")
+    data_formulator_plugin_dir: str = Field(default="tools/data-formulator/plugins", alias="DATA_FORMULATOR_PLUGIN_DIR")
+    data_formulator_signed_url_secret: str | None = Field(default=None, alias="DATA_FORMULATOR_SIGNED_URL_SECRET")
+    data_formulator_allowed_origins: str = Field(default="http://localhost:5567", alias="DATA_FORMULATOR_ALLOWED_ORIGINS")
+    data_formulator_auto_import_enabled: bool = Field(default=False, alias="DATA_FORMULATOR_AUTO_IMPORT_ENABLED")
+    data_formulator_session_export_enabled: bool = Field(default=False, alias="DATA_FORMULATOR_SESSION_EXPORT_ENABLED")
+    analyse_api_base_url: str = Field(default="http://localhost:5100", alias="ANALYSE_API_BASE_URL")
 
     enable_external_research: bool = Field(default=True, alias="ENABLE_EXTERNAL_RESEARCH")
     enable_vietstock: bool = Field(default=True, alias="ENABLE_VIETSTOCK")
@@ -274,6 +294,30 @@ class Settings(BaseSettings):
         clean = str(value or "non_blocking").strip().lower().replace("-", "_")
         return clean if clean in {"non_blocking", "strict"} else "non_blocking"
 
+    @field_validator("visualization_default_chart_range", mode="before")
+    @classmethod
+    def _validate_visualization_default_chart_range(cls, value: object) -> str:
+        clean = str(value or "1y").strip().lower()
+        return clean if clean in {"7d", "1m", "3m", "6m", "1y", "all"} else "1y"
+
+    @field_validator("visualization_max_rows", mode="before")
+    @classmethod
+    def _validate_visualization_max_rows(cls, value: object) -> int:
+        try:
+            rows = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 5000
+        return min(100_000, max(1, rows))
+
+    @field_validator("visualization_dataset_ttl_seconds", mode="before")
+    @classmethod
+    def _validate_visualization_dataset_ttl_seconds(cls, value: object) -> int:
+        try:
+            ttl_seconds = int(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return 1800
+        return max(60, ttl_seconds)
+
     @property
     def env_file_path(self) -> str:
         return str(ANALYSE_ROOT / ".env")
@@ -292,6 +336,11 @@ class Settings(BaseSettings):
         if self.cors_allowed_origin_list == ["*"]:
             return False
         return self.cors_allow_credentials
+
+    @property
+    def data_formulator_allowed_origin_list(self) -> list[str]:
+        origins = [origin.strip() for origin in (self.data_formulator_allowed_origins or "").split(",") if origin.strip()]
+        return origins or ["http://localhost:5567"]
 
     @property
     def effective_enable_vietstock_financial_fallback(self) -> bool:
