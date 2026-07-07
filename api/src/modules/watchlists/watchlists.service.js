@@ -1,4 +1,5 @@
 const watchlistsRepository = require('./watchlists.repository');
+const alertRepository = require('../alerts/alert.repository');
 const DimStock = require('../../database/models/dim-stock.model');
 const FactMarketPrice = require('../../database/models/fact-market-price.model');
 const { PLAN_LIMITS } = require('../../config/plan.config');
@@ -111,6 +112,10 @@ const removeStockFromWatchlist = async (userId, symbol) => {
   }
 
   await watchlistsRepository.deleteWatchlistEntry(userId, stock._id);
+
+  // Clean up orphan alerts for removed stock
+  await alertRepository.deleteAlertsForStock(userId, stock._id);
+
   return true;
 };
 
@@ -132,6 +137,9 @@ const trimWatchlist = async (userId, keepStockIds, userPlan = 'FREE') => {
 
   if (idsToDelete.length > 0) {
     await watchlistsRepository.deleteMultipleWatchlistEntries(userId, idsToDelete);
+
+    // Clean up orphan alerts for removed stocks
+    await alertRepository.deleteMultipleAlertsForStocks(userId, idsToDelete);
   }
 
   return {
